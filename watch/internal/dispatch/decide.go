@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
@@ -168,6 +169,22 @@ const (
 	reasonContainerSessionProbeUnknown = "container session probe unrecognized"
 	reasonConcurrencyCap               = "concurrency cap reached"
 	reasonConcurrencyCapOrphansFmt     = "concurrency cap reached (%d orphaned container sessions)"
+)
+
+// Admission skip reasons (#1469), the refusals of the capacity ledger's Admit
+// after Decide: the repo's own ceiling (also Decide's own per-repo pre-filter),
+// and why the host's load could not be known. A refusal for a worker already
+// holding the ticket (`worker already reserved`) or a babysit repair writing the
+// ticket's branch (`branch writer active`) carries the ledger's own string
+// (capacity.Reason*), one definition shared with babysit's capacity wait reasons.
+// The formats take the ledger path and reason, the observation that was
+// unavailable, and the limits reason.
+const (
+	reasonRepoConcurrencyCap = capacity.ReasonRepoCap
+
+	reasonCapacityLedgerUnreadableFmt       = "capacity ledger unreadable: %s: %s"
+	reasonCapacityObservationUnavailableFmt = "capacity observation unavailable: %s"
+	reasonCapacityLimitsUnreadableFmt       = "capacity limits unreadable: %s"
 )
 
 // Memory-headroom gate skip reasons (#1290). reasonMemoryProbeUnknown is
@@ -437,6 +454,7 @@ func Decide(in Inputs) []Decision {
 	// per-parent record of children dispatched this pass (sibling serialization).
 	// The parent key is (repo, parentId) so parents don't collide across repos.
 	dispatchedThisPass := 0
+	dispatchedByRepo := map[string]int{}
 	dispatchedChildByParent := map[string]int{}
 
 	// Machine-local pickup filters (#1385), resolved once per pass from the
@@ -447,9 +465,10 @@ func Decide(in Inputs) []Decision {
 
 	decisions := make([]Decision, 0, len(tickets))
 	for _, t := range tickets {
-		d := decideTicket(t, in, planByTicket, filterByRepo, dispatchedThisPass, dispatchedChildByParent)
+		d := decideTicket(t, in, planByTicket, filterByRepo, dispatchedThisPass, dispatchedByRepo[t.Repo], dispatchedChildByParent)
 		if d.Action == ActionDispatch {
 			dispatchedThisPass++
+			dispatchedByRepo[t.Repo]++
 			if d.Plan != nil && d.Plan.IsChild {
 				dispatchedChildByParent[planKey(t.Repo, d.Plan.ParentID)] = t.Number
 			}
@@ -483,7 +502,7 @@ func indexPlans(plans []Plan) map[string]*Plan {
 	return m
 }
 
-func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRepo map[string]RepoFilter, dispatchedThisPass int, dispatchedChildByParent map[string]int) Decision {
+func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRepo map[string]RepoFilter, dispatchedThisPass, dispatchedThisRepo int, dispatchedChildByParent map[string]int) Decision {
 	skip := func(reason string) Decision {
 		return Decision{Ticket: t, Action: ActionSkip, Reason: reason}
 	}
@@ -776,6 +795,14 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRe
 			return skip(reason)
 		}
 		note = n
+	}
+	// The cap gate: the repo's own ceiling against this pass's dispatches into the
+	// repo first (#1469), then the machine ceiling. The repo check sits inside
+	// this slot so a capped repo's later tickets never use the machine slots
+	// another repo needs; the ledger's Admit stays the authoritative check and
+	// adds the entries other launchers hold.
+	if repoCapGated(in.Config, t.Repo, dispatchedThisRepo) {
+		return skip(reasonRepoConcurrencyCap)
 	}
 	if in.Snapshot.Summary.Running+in.OrphanedContainerSessions+dispatchedThisPass >= in.Config.ConcurrencyCap {
 		if in.OrphanedContainerSessions > 0 {
@@ -1263,6 +1290,24 @@ type DailyQuotaState struct {
 	Read       bool
 	Used       int
 	Unreadable string
+}
+
+// repoCapGated evaluates the per-repo half of the cap gate (#1469): whether this
+// pass's dispatches into repo have reached its effective ceiling, the lower of its
+// dispatch.repos[].concurrencyCap and the machine cap. A repo with no cap, or a
+// cap above the machine's, is left to the machine check that follows (the same
+// clamp the ledger applies), so a cap of 0 admits nothing for the repo and the
+// machine pause keeps its own reason.
+func repoCapGated(cfg Config, repo string, dispatchedThisRepo int) bool {
+	for _, rc := range cfg.Repos {
+		if rc.ConcurrencyCap == nil || !strings.EqualFold(rc.Repo, repo) {
+			continue
+		}
+		if *rc.ConcurrencyCap <= cfg.ConcurrencyCap && dispatchedThisRepo >= *rc.ConcurrencyCap {
+			return true
+		}
+	}
+	return false
 }
 
 // dailyQuotaSkip evaluates the daily-quota gate (#1566). A nil limit (quota off)

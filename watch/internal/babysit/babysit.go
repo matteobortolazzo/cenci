@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
@@ -266,6 +267,23 @@ type State struct {
 	// the legacy same-head hold (a pre-#1457 worker cannot be probed). Additive
 	// `omitempty`, no stateSchemaVersion bump.
 	CIRepairTracked bool `json:"ciRepairTracked,omitempty"`
+
+	// CapacityWait (#1469) records that a repair this supervisor needs was
+	// refused by the shared admission ledger (the host is full, or the ledger,
+	// the limits or an observation could not be read), with the reason. It is
+	// written every tick the repair is still refused and cleared the first tick
+	// it is not (the repair launched, is no longer needed, or the PR merged,
+	// closed or was stopped). `cenci babysit status` reads it, with no tmux or
+	// ledger read, to derive the activity key. Additive `omitempty`, no
+	// stateSchemaVersion bump.
+	CapacityWait *capacityWait `json:"capacityWait,omitempty"`
+	// RepairWorkerLive (#1469) is the last tick's verdict that a repair worker
+	// (ci-repair, merge-repair or babysit-review) of this PR is running, so
+	// `cenci babysit status` can say "repairing" without reading tmux: from the
+	// pane inventory on a tick that probed, else from whether the ledger still
+	// holds a repair entry of this PR after the tick's release.
+	// Additive `omitempty`, no stateSchemaVersion bump.
+	RepairWorkerLive bool `json:"repairWorkerLive,omitempty"`
 
 	// Automerge fields (#824). The supervisor's detached mode sets
 	// cmd.Stdout = nil, so the automerge decision log line only reaches a
@@ -825,6 +843,9 @@ func tick(s *State) (bool, time.Duration, error) {
 		return false, 0, err
 	}
 	if pr.State == "MERGED" || pr.State == "CLOSED" {
+		// #1469: a repair waiting for capacity is over with the PR. The wait is
+		// dropped before Run removes the state file, so no record outlives it.
+		dropCapacityWait(s)
 		if pr.State == "MERGED" {
 			_, _, _ = execGh("label", "create", "Implemented", "--repo", s.Repo, "--color", "6F42C1", "--description", "PR merged — done")
 			var childErrs []error
@@ -856,6 +877,10 @@ func tick(s *State) (bool, time.Duration, error) {
 		fmt.Printf("PR #%s %s: %s %s\n", s.PR, strings.ToLower(pr.State), pr.Title, pr.URL)
 		return true, 0, nil
 	}
+	// #1469: every live tick lets the shared admission ledger release the
+	// reservations a complete tmux inventory proves gone, whoever made them, so the
+	// next admitter sees the freed slots.
+	ledgerHeld, ledgerKnown := reconcileCapacity(s)
 	// Publish the close guard's join key from data this tick already fetched
 	// — no extra API calls (#787) -- before the checks fetch runs, so a
 	// checks failure still leaves it populated (#923).
@@ -944,6 +969,9 @@ func tick(s *State) (bool, time.Duration, error) {
 	// repair for an observed conflict, then CI repair, then babysit-review
 	// below. A live CI or merge worker for this PR suppresses all of them.
 	ciLaunched := false
+	// #1469: capWaiting is set when the admission ledger refused a repair this
+	// tick (it waits for capacity); repairStarted when one was launched.
+	capWaiting, repairStarted := false, false
 	switch {
 	case conflicting:
 		// Merge repair is independent of automerge policy. A successful
@@ -958,9 +986,12 @@ func tick(s *State) (bool, time.Duration, error) {
 			fmt.Printf("PR #%s has merge conflicts but its head commit SHA is unknown; not opening a new merge-repair window\n", s.PR)
 			break
 		}
-		if err := repairConflict(s, pr, live); err != nil {
+		outcome, err := repairConflict(s, pr, live)
+		if err != nil {
 			return false, 0, err
 		}
+		capWaiting = outcome == repairWaiting
+		repairStarted = outcome == repairLaunched
 	case !conflictHeld && len(failing) > 0:
 		if !s.CIRepairTracked && s.LastRepairedSHA != "" && s.LastRepairedSHA == pr.HeadRefOID {
 			// Legacy hold: a state written before #1457 recorded this head's
@@ -994,7 +1025,7 @@ func tick(s *State) (bool, time.Duration, error) {
 			// ever changed.
 			s.CIRepairPaused = true
 			if !s.CICapNotified {
-				if err := launch(s, "babysit-attention", s.PR+" CI retry cap reached"); err != nil {
+				if err := launch(s, "babysit-attention", s.PR+" CI retry cap reached", nil); err != nil {
 					// One-decision-per-tick (Decision 7, #854): without this, a
 					// failed workflow dispatch on an enabled automerge tick
 					// returned tick's error with no automerge decision recorded
@@ -1008,12 +1039,22 @@ func tick(s *State) (bool, time.Duration, error) {
 			}
 			break
 		}
-		if err := dispatchCIRepair(s, pr, failing); err != nil {
+		outcome, err := dispatchCIRepair(s, pr, failing, w)
+		if err != nil {
 			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
 			return false, 0, err
 		}
+		if outcome == repairWaiting {
+			// #1469: the host is full. Nothing is consumed -- no retry budget, no
+			// LastRepairedSHA -- and the tick stays at its base interval so the
+			// repair is retried on the next poll.
+			capWaiting = true
+			actionable = true
+			break
+		}
 		// Consume the CI retry budget only for work dispatched.
 		ciLaunched = true
+		repairStarted = true
 		s.FixAttempts++
 		s.RepairPending = true
 		s.LastHeadSHA = pr.HeadRefOID
@@ -1271,7 +1312,7 @@ func tick(s *State) (bool, time.Duration, error) {
 	// excluded until the thread reappears or the attestation is dropped: it already
 	// holds under reasonReviewStateUnknown and a worker has nothing to act on.
 	heldKeys := slices.Concat(s.HeldUntrustedKeys, slices.Collect(maps.Keys(s.ActorHeldKeys)), slices.Collect(maps.Keys(s.ActorAttestations)))
-	if toLaunch := removeKeys(removeKeys(s.PendingKeys, s.LaunchedKeys), heldKeys); discussionComplete && !conflictHeld && !ciLaunched && len(toLaunch) > 0 {
+	if toLaunch := removeKeys(removeKeys(s.PendingKeys, s.LaunchedKeys), heldKeys); discussionComplete && !conflictHeld && !ciLaunched && !capWaiting && len(toLaunch) > 0 {
 		w, err := live()
 		if err != nil {
 			return false, 0, err
@@ -1297,11 +1338,16 @@ func tick(s *State) (bool, time.Duration, error) {
 				fmt.Printf("PR #%s: holding untrusted review feedback for a write-access human, no worker launched for it: %s (capped: %s)\n", s.PR, strings.Join(plan.held, ", "), strings.Join(plan.capped, ", "))
 			}
 			if len(plan.keys) > 0 {
-				if err := launchBabysitReview(s, plan.keys, plan.trusted, pr.HeadRefOID); err != nil {
+				outcome, err := launchBabysitReview(s, pr, plan.keys, plan.trusted, w)
+				if err != nil {
 					recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
 					return false, 0, err
 				}
-				launchedNow = true
+				// A refused review (#1469) leaves the keys pending and unlaunched,
+				// the tick actionable, and launches the review on a later tick.
+				capWaiting = capWaiting || outcome == repairWaiting
+				launchedNow = outcome == repairLaunched
+				repairStarted = repairStarted || launchedNow
 				actionable = true
 			}
 		}
@@ -1348,6 +1394,14 @@ func tick(s *State) (bool, time.Duration, error) {
 	// human-recovery notes above.
 	workerLive := observed != nil && observed.any()
 	actionable = actionable || workerLive
+	// #1469: the capacity wait lasts exactly as long as a repair is still refused;
+	// a tick that needs none (it launched, or nothing is wanted) ends it. The live
+	// repair worker is persisted for `cenci babysit status`; a quiet tick takes it
+	// from the ledger's release above, with no pane read.
+	if !capWaiting {
+		dropCapacityWait(s)
+	}
+	s.RepairWorkerLive = repairWorkerLive(s.RepairWorkerLive, repairStarted, observed, ledgerHeld, ledgerKnown)
 	if observed != nil {
 		workerNotes = append(slices.Clone(observed.notes), workerNotes...)
 	}
@@ -1387,13 +1441,15 @@ func tick(s *State) (bool, time.Duration, error) {
 // ownership, means no launch: the episode is recorded (a manual worker keeps
 // ownership across a later UNKNOWN tick) and an ended worker is retried on the
 // first tick after it ends. Otherwise the cap branch opens attention once per
-// head, or merge-repair launches.
-func repairConflict(s *State, pr prView, live func() (workerLiveness, error)) error {
+// head, or merge-repair launches -- if the admission ledger grants it a slot
+// (#1469). A refusal is repairWaiting: it is recorded as a capacity wait and
+// leaves the attempt count and the conflict episode untouched.
+func repairConflict(s *State, pr prView, live func() (workerLiveness, error)) (repairOutcome, error) {
 	// Probe even before our first recorded dispatch: a manually-started
 	// repair owns the same branch and must not receive a second writer.
 	w, err := live()
 	if err != nil {
-		return err
+		return repairNone, err
 	}
 	switch {
 	case w.any():
@@ -1404,42 +1460,55 @@ func repairConflict(s *State, pr prView, live func() (workerLiveness, error)) er
 		fmt.Printf("PR #%s has merge conflicts at head commit %s; repair already dispatched or %s, no new window opened\n", s.PR, pr.HeadRefOID, w.describe(s.PR))
 	case s.ConflictFixAttempts >= fixCap:
 		if s.ConflictNotifiedSHA != pr.HeadRefOID {
-			if err := launch(s, "babysit-attention", s.PR+" merge repair retry cap reached"); err != nil {
+			if err := launch(s, "babysit-attention", s.PR+" merge repair retry cap reached", nil); err != nil {
 				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-				return err
+				return repairNone, err
 			}
 			s.ConflictNotifiedSHA = pr.HeadRefOID
 		}
 		s.Status = "needs-input"
 	default:
-		if err := launch(s, "merge-repair", s.PR); err != nil {
+		permit, reason := admitRepair(s, pr, capacity.KindMergeRepair, w)
+		if permit == nil {
+			recordCapacityWait(s, capacity.KindMergeRepair, reason)
+			return repairWaiting, nil
+		}
+		if err := launch(s, "merge-repair", s.PR, permit); err != nil {
 			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-			return err
+			return repairNone, err
 		}
 		s.ConflictRepairSHA = pr.HeadRefOID
 		s.ConflictFixAttempts++
 		s.Status = "running"
 		fmt.Printf("PR #%s has merge conflicts at head commit %s; opened merge-repair with Claude Opus\n", s.PR, pr.HeadRefOID)
+		return repairLaunched, nil
 	}
-	return nil
+	return repairNone, nil
 }
 
 // dispatchCIRepair starts one finite ci-repair worker for the failing checks
 // (#1455). The argument leads with the PR number, so `cenci run` names the
 // window `<PR>-ci-repair`; the prose after it is unchanged. tick has already
-// read the pane inventory and found no live writer (#1457). A `cenci run` that
-// spawned the window but failed its post-spawn setup (exit 3) is a dispatched
-// attempt: the worker is starting. Any other error is a launch that consumed
-// nothing.
-func dispatchCIRepair(s *State, pr prView, failing []string) error {
+// read the pane inventory and found no live writer (#1457), and w is that
+// reading. The admission ledger must grant a slot first (#1469): a refusal is
+// repairWaiting, recorded as a capacity wait, with nothing launched and nothing
+// consumed. A `cenci run` that spawned the window but failed its post-spawn setup
+// (exit 3) is a dispatched attempt: the worker is starting. Any other error is a
+// launch that consumed nothing.
+func dispatchCIRepair(s *State, pr prView, failing []string, w workerLiveness) (repairOutcome, error) {
+	permit, reason := admitRepair(s, pr, capacity.KindCIRepair, w)
+	if permit == nil {
+		recordCapacityWait(s, capacity.KindCIRepair, reason)
+		return repairWaiting, nil
+	}
 	prompt := fmt.Sprintf("%s PR #%s (%s) has failing CI checks: %s. Diagnose, fix, test, commit, and push without force-pushing.", s.PR, s.PR, pr.HeadRefName, strings.Join(failing, ", "))
-	if err := launch(s, "ci-repair", prompt); err != nil {
+	if err := launch(s, "ci-repair", prompt, permit); err != nil {
 		if !errors.Is(err, errWindowSpawned) {
-			return err
+			return repairNone, err
 		}
 		fmt.Printf("warning: PR #%s: %v; the ci-repair window was spawned, counting the attempt as dispatched\n", s.PR, err)
 	}
-	return nil
+	return repairLaunched, nil
 }
 
 // consumeReviewReceipt verifies the outstanding launch's receipt against the
@@ -1613,18 +1682,27 @@ func reviewLaunchArg(s *State, nonce string, keys, trusted []string) string {
 // worker is starting. Any other failure consumes nothing: no nonce is recorded
 // and the keys stay unlaunched. A still-outstanding earlier nonce is superseded
 // (recorded in ConsumedReviewNonces with comment id 0), so a late receipt for it
-// is a rejection. #1539: the launch records headSHA, the PR head it starts from,
-// for the head-move check, and every dispatched launch (exit 3 included) counts
-// once toward each untrusted discussion key's launch cap.
-func launchBabysitReview(s *State, keys, trusted []string, headSHA string) error {
+// is a rejection. #1539: the launch records pr's head, the PR head it starts
+// from, for the head-move check, and every dispatched launch (exit 3 included)
+// counts once toward each untrusted discussion key's launch cap. #1469: the
+// admission ledger must grant a slot first (w is the tick's worker liveness); a
+// refusal is repairWaiting, recorded as a capacity wait, and mints and records
+// nothing: no nonce is consumed and the keys stay pending and unlaunched.
+func launchBabysitReview(s *State, pr prView, keys, trusted []string, w workerLiveness) (repairOutcome, error) {
+	permit, reason := admitRepair(s, pr, capacity.KindBabysitReview, w)
+	if permit == nil {
+		recordCapacityWait(s, capacity.KindBabysitReview, reason)
+		return repairWaiting, nil
+	}
 	nonce, err := newReviewNonce()
 	if err != nil {
-		return err
+		settlePermit(s, "babysit-review", permit, false)
+		return repairNone, err
 	}
 	launchedAt := launchClock()
-	if err := launch(s, "babysit-review", reviewLaunchArg(s, nonce, keys, trusted)); err != nil {
+	if err := launch(s, "babysit-review", reviewLaunchArg(s, nonce, keys, trusted), permit); err != nil {
 		if !errors.Is(err, errWindowSpawned) {
-			return err
+			return repairNone, err
 		}
 		fmt.Printf("warning: PR #%s: %v; the babysit-review window was spawned, counting the launch as dispatched\n", s.PR, err)
 	}
@@ -1636,7 +1714,7 @@ func launchBabysitReview(s *State, keys, trusted []string, headSHA string) error
 			s.ConsumedReviewNonces[old.Nonce] = 0
 		}
 	}
-	s.ReviewLaunch = &reviewLaunchRecord{Nonce: nonce, LaunchedAt: launchedAt, Keys: slices.Clone(keys), TrustedKeys: slices.Clone(trusted), HeadSHA: headSHA}
+	s.ReviewLaunch = &reviewLaunchRecord{Nonce: nonce, LaunchedAt: launchedAt, Keys: slices.Clone(keys), TrustedKeys: slices.Clone(trusted), HeadSHA: pr.HeadRefOID}
 	s.LaunchedKeys = append(s.LaunchedKeys, keys...)
 	for _, k := range keys {
 		if isDiscussionKey(k) && !slices.Contains(trusted, k) {
@@ -1646,7 +1724,7 @@ func launchBabysitReview(s *State, keys, trusted []string, headSHA string) error
 			s.UntrustedLaunchCounts[k]++
 		}
 	}
-	return nil
+	return repairLaunched, nil
 }
 
 // checkReviewLaunchHead is the head-move check (#1539), run once per launch on
@@ -1742,19 +1820,38 @@ var errWindowSpawned = errors.New("window spawned but its post-spawn setup faile
 // `--tmux-socket`, right after `--session`, so the window is created on the
 // server the session was found on; a state with no recorded socket probes bare
 // and passes no flag.
-func launch(s *State, workflow, arg string) error {
+//
+// Capacity (#1469): permit is the reservation the admission ledger granted for
+// this launch. A branch writer (ci-repair, merge-repair, babysit-review) needs one
+// of its own kind: with a nil or another kind's permit launch returns an error and
+// runs nothing, so no call site can start an uncounted worker. babysit-attention is
+// not charged and takes nil. A failure before `cenci run` ran releases the
+// reservation; once `cenci run` ran, whatever it exited with, the reservation is
+// confirmed to the deterministic window name (see settlePermit).
+func launch(s *State, workflow, arg string, permit *capacity.Permit) error {
+	if kind, charged := chargedKind(workflow); charged && (permit == nil || permit.Kind != kind) {
+		return fmt.Errorf("launch %s: no capacity reservation for it: a branch-writing launch needs a permit from the admission ledger", workflow)
+	}
+	ran, err := runWorkflow(s, workflow, arg)
+	settlePermit(s, workflow, permit, ran)
+	return err
+}
+
+// runWorkflow is launch's `cenci run` self-exec. ran reports whether `cenci run`
+// was started: false for every refusal that issued no command.
+func runWorkflow(s *State, workflow, arg string) (ran bool, err error) {
 	if s.LaunchSession == "" {
-		return fmt.Errorf("launch %s: no tmux session was recorded at arm time; re-arm from a host tmux pane", workflow)
+		return false, fmt.Errorf("launch %s: no tmux session was recorded at arm time; re-arm from a host tmux pane", workflow)
 	}
 	// The probe runs on the socket recorded at arm time (#1431); a state without
 	// one probes with bare tmux as before. A socket that fails the execTmux
 	// re-check is an error here, so it never reaches `cenci run`.
 	exists, err := tmuxHasSession(s.LaunchSocket, s.LaunchSession)
 	if err != nil {
-		return fmt.Errorf("launch %s: checking tmux session %q: %w", workflow, s.LaunchSession, err)
+		return false, fmt.Errorf("launch %s: checking tmux session %q: %w", workflow, s.LaunchSession, err)
 	}
 	if !exists {
-		return fmt.Errorf("launch %s: recorded tmux session %q no longer exists", workflow, s.LaunchSession)
+		return false, fmt.Errorf("launch %s: recorded tmux session %q no longer exists", workflow, s.LaunchSession)
 	}
 	agent := s.Agent
 	if workflow == "merge-repair" {
@@ -1775,11 +1872,11 @@ func launch(s *State, workflow, arg string) error {
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == cenciRunExitWindowSpawned {
-			return fmt.Errorf("launch %s: %s: %w: %w", workflow, strings.TrimSpace(string(out)), err, errWindowSpawned)
+			return true, fmt.Errorf("launch %s: %s: %w: %w", workflow, strings.TrimSpace(string(out)), err, errWindowSpawned)
 		}
-		return fmt.Errorf("launch %s: %s: %w", workflow, strings.TrimSpace(string(out)), err)
+		return true, fmt.Errorf("launch %s: %s: %w", workflow, strings.TrimSpace(string(out)), err)
 	}
-	return nil
+	return true, nil
 }
 
 // detectNewFeedbackKeys is the pure, read-only new-feedback detection
@@ -2128,6 +2225,10 @@ func stopRepo(repo, pr, explicit string, strict bool) (gonePID int, err error) {
 		fmt.Fprintf(os.Stderr, "babysit state unreadable: %s: removed; the pending and addressed feedback bookkeeping for PR #%s was discarded, so every comment is detected again after a re-arm\n", path, cleanPR)
 		return gonePID, nil
 	}
+	// #1469: a repair waiting for capacity is over when its supervisor is stopped.
+	// stoppedState keeps no wait, and the ledger's record goes with it.
+	s.Repo, s.PR = repo, cleanPR
+	dropCapacityWait(&s)
 	if err := save(path, stoppedState(s, repo, cleanPR)); err != nil {
 		return 0, &classifiedError{class: ErrStopFailed, cause: err, msg: err.Error()}
 	}
@@ -2237,6 +2338,7 @@ func StatusRepo(repo, pr, explicit string) (ipc.BabysitStatus, error) {
 		ConflictFixAttempts: s.ConflictFixAttempts,
 		FixCap:              fixCap,
 		SupervisorLive:      s.PID > 0 && processOwned(s.PID, cleanPR),
+		Activity:            activityOf(s, time.Now()),
 	}, nil
 }
 

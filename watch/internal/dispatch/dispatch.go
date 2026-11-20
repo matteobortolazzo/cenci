@@ -433,6 +433,11 @@ func readPlansForRepos(repos []RepoConfig, syncs map[string]mainSyncResult, out 
 // the spawn already happened, and the reconciler recovers label drift. It is
 // the testable core of RunOnce.
 //
+// Every decision that would spawn is admitted by the shared capacity ledger
+// (#1469) between Decide and the decision log: a refusal becomes a skip, a launch
+// that fails before any window exists gives its reservation back, and one that
+// may have created a window keeps it (capacity.go). A dry run admits nothing.
+//
 // With Config.DailyQuota set (#1566), the persisted count is read once before
 // Decide (Used on a real pass, Peek on a dry run) and one launch is recorded
 // after each successful spawn, whether or not the Working claim then succeeds.
@@ -499,12 +504,22 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		PlanningTrust:             deps.PlanningTrust,
 	})
 
+	// Admission (#1469): each decision that would spawn reserves a slot in the
+	// shared capacity ledger BEFORE the decision table is logged, so a refusal is
+	// rewritten to a skip and every ticket still gets exactly one decision line. A
+	// dry run admits nothing and writes nothing: it logs Decide's decisions as
+	// they are, and the ledger is never created by it.
+	var adm *admitter
+	var permits map[int]*capacity.Permit
 	if dryRun {
 		for i := range decisions {
 			if decisions[i].Action == ActionDispatch && sessionByRepo[decisions[i].Ticket.Repo] != "" {
 				decisions[i].Note = joinNotes(decisions[i].Note, noteSessionNotProbed)
 			}
 		}
+	} else {
+		adm = newAdmitter(cfg, deps, socket, dirByRepo, out)
+		permits = adm.admitDecisions(decisions, eligibility)
 	}
 
 	// Surface the pinned model in the same log stream as the decision table so
@@ -561,6 +576,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		if dir := dirByRepo[d.Ticket.Repo]; dir != "" {
 			if err := clearLaunchFn(pipeline.ArtifactOpts{ID: strconv.Itoa(d.Ticket.Number), RepoRoot: dir}); err != nil {
 				logf(out, "dispatch: #%d clearing recorded launch failed: %v\n", d.Ticket.Number, err)
+				adm.release(permits[i], d.Ticket.Number)
 				continue
 			}
 		}
@@ -583,10 +599,21 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 			if err := mut.EditLabels(d.Ticket.Repo, d.Ticket.Number, []string{labelWorking}, []string{labelInputNeeded}); err != nil {
 				logf(out, "dispatch: #%d resume claim failed: %v\n", d.Ticket.Number, err)
 				firstErr = firstNonNil(firstErr, err)
+				adm.release(permits[i], d.Ticket.Number)
 				continue
 			}
 		}
 
+		// The controller runFn gets records whether a tmux window creation was
+		// attempted (#1469): that is how the reservation tells a launch that
+		// definitely failed before any window existed (released) from one that may
+		// have one (confirmed to the deterministic window name).
+		spawnCtrl := ctrl
+		var tracker *spawnTracker
+		if ctrl != nil {
+			tracker = &spawnTracker{Controller: ctrl}
+			spawnCtrl = tracker
+		}
 		err := runFn(run.Opts{
 			Workflow:     "implement",
 			Ticket:       dispatchTicketArg(d),
@@ -609,7 +636,16 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 			// nobody to answer an interactive question and would sit there
 			// with the ticket stuck on Working.
 			Unattended: true,
-		}, ctrl)
+		}, spawnCtrl)
+		// Settle the reservation: only a launch that never reached NewWindow is
+		// given back. A spawn that succeeded, failed after the window was created
+		// (exit 3, run.ErrWindowSpawned) or failed in NewWindow itself holds the
+		// slot until a complete inventory proves no worker.
+		if err != nil && !errors.Is(err, run.ErrWindowSpawned) && (tracker == nil || !tracker.newWindowCalled) {
+			adm.release(permits[i], d.Ticket.Number)
+		} else {
+			adm.confirm(permits[i], d)
+		}
 		if err != nil {
 			logf(out, "dispatch: #%d run failed: %v\n", d.Ticket.Number, err)
 			firstErr = firstNonNil(firstErr, err)

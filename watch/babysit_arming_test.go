@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -338,7 +339,7 @@ func TestBabysitStatusWireFormat(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			got = req
-			return ipc.BabysitStatusResponse{OK: true, Status: &ipc.BabysitStatus{PR: 42, Repo: "owner/repo", Status: "needs-input", CIFixAttempts: 3, FixCap: 3}}
+			return ipc.BabysitStatusResponse{OK: true, Status: &ipc.BabysitStatus{PR: 42, Repo: "owner/repo", Status: "needs-input", CIFixAttempts: 3, FixCap: 3, Activity: "needs-input"}}
 		})
 
 		stdout, stderr, code := runBabysitCLI(t, armChildEnv(t, writeArmTestGhShim(t)), "babysit", "status", "42")
@@ -346,7 +347,7 @@ func TestBabysitStatusWireFormat(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
 		}
-		const want = `{"pr":42,"repo":"owner/repo","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":false}` + "\n"
+		const want = `{"pr":42,"repo":"owner/repo","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":false,"activity":"needs-input"}` + "\n"
 		if stdout != want {
 			t.Errorf("stdout = %q, want %q", stdout, want)
 		}
@@ -420,12 +421,56 @@ func TestBabysitStatusHostMode(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
 		}
-		const want = `{"pr":42,"repo":"owner/repo","status":"needs-input","ciFixAttempts":2,"conflictFixAttempts":1,"fixCap":3,"supervisorLive":false}` + "\n"
+		const want = `{"pr":42,"repo":"owner/repo","status":"needs-input","ciFixAttempts":2,"conflictFixAttempts":1,"fixCap":3,"supervisorLive":false,"activity":"needs-input"}` + "\n"
 		if stdout != want {
 			t.Errorf("stdout = %q, want %q", stdout, want)
 		}
 		if strings.Contains(stdout, stateHome) {
 			t.Errorf("stdout %q contains the state home path", stdout)
+		}
+	})
+
+	// #1469: the activity key follows needs-input > repairing > waiting-for-capacity
+	// > monitoring, from the persisted state alone, and every other key keeps its
+	// value. Each row is one state file decoded back from the real CLI's one line.
+	t.Run("activity follows the persisted state", func(t *testing.T) {
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(stateDir, hex.EncodeToString(sum[:6])+"-44.json")
+		fresh := time.Now().UTC().Format(time.RFC3339Nano)
+		wait := `"capacityWait":{"reason":"concurrency cap reached","since":"` + fresh + `","refreshedAt":"` + fresh + `"}`
+		for _, tc := range []struct{ name, extra, status, want string }{
+			{"monitoring", ``, "running", "monitoring"},
+			{"repairing", `"repairWorkerLive":true`, "running", "repairing"},
+			{"waiting-for-capacity", wait, "running", "waiting-for-capacity"},
+			{"repairing beats waiting", `"repairWorkerLive":true,` + wait, "running", "repairing"},
+			{"needs-input beats both", `"repairWorkerLive":true,` + wait, "needs-input", "needs-input"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				body := `{"schemaVersion":2,"pr":"44","repo":"owner/repo","status":"` + tc.status + `","intervalSeconds":60,"ciFixAttempts":1,"conflictFixAttempts":2`
+				if tc.extra != "" {
+					body += "," + tc.extra
+				}
+				body += "}"
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+
+				stdout, stderr, code := runBabysitCLI(t, hostChildEnv(t), "babysit", "status", "44")
+
+				if code != 0 {
+					t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
+				}
+				var got map[string]any
+				if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+					t.Fatalf("stdout %q is not one JSON object: %v", stdout, err)
+				}
+				want := map[string]any{"pr": 44.0, "repo": "owner/repo", "status": tc.status, "ciFixAttempts": 1.0, "conflictFixAttempts": 2.0, "fixCap": 3.0, "supervisorLive": false, "activity": tc.want}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("status object = %v, want %v", got, want)
+				}
+			})
 		}
 	})
 

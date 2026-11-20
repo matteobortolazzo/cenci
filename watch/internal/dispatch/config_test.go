@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 )
 
 // TestLoadConfigMergesModel locks in that a "model" key in the "dispatch"
@@ -844,6 +846,14 @@ func TestLoadConfig_DailyQuota_InvalidReturnsUnmergedDefaults(t *testing.T) {
 	}
 }
 
+// The machine cap default is one value: the capacity package's limits parser
+// applies it when the key or the file is absent, and DefaultConfig must agree.
+func TestDefaultConfig_ConcurrencyCapIsTheCapacityDefault(t *testing.T) {
+	if got := DefaultConfig().ConcurrencyCap; got != capacity.DefaultMachineCap {
+		t.Errorf("DefaultConfig().ConcurrencyCap = %d, want capacity.DefaultMachineCap (%d)", got, capacity.DefaultMachineCap)
+	}
+}
+
 // TestDefaultConfig_PinnedValues: the defaults #1566 must not disturb, plus the
 // new off-by-default quota.
 func TestDefaultConfig_PinnedValues(t *testing.T) {
@@ -1112,5 +1122,102 @@ func TestFilterDecideParityWithUnfilteredConfig(t *testing.T) {
 				t.Errorf("decisions differ from the unfiltered config:\n got %+v\nwant %+v", got, want)
 			}
 		})
+	}
+}
+
+// -- dispatch.repos[].concurrencyCap (#1469) ------------------------------------
+
+func writeRepoCapConfig(t *testing.T, capFragment string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"dispatch":{"concurrencyCap":3,"repos":[{"repo":"o/a","dir":"/a","session":"s"` + capFragment + `},{"repo":"o/b","dir":"/b","session":"s"}]}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// An absent key is no repo ceiling, and 0 is a valid ceiling that admits nothing.
+func TestLoadConfig_RepoConcurrencyCap_ParsesAbsentAndIntegers(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		fragment string
+		want     *int
+	}{
+		{"absent", "", nil},
+		{"zero", `,"concurrencyCap":0`, intp(0)},
+		{"one", `,"concurrencyCap":1`, intp(1)},
+		{"above the machine cap", `,"concurrencyCap":9`, intp(9)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadConfig(writeRepoCapConfig(t, tt.fragment))
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			got := cfg.Repos[0].ConcurrencyCap
+			if (got == nil) != (tt.want == nil) || (got != nil && *got != *tt.want) {
+				t.Errorf("o/a ConcurrencyCap = %v, want %v", got, tt.want)
+			}
+			if cfg.Repos[1].ConcurrencyCap != nil {
+				t.Errorf("o/b ConcurrencyCap = %v, want none (the cap belongs to its own repo entry)", *cfg.Repos[1].ConcurrencyCap)
+			}
+		})
+	}
+}
+
+// A null, negative or non-integer cap is an error that names the key, never a
+// silent default, and the load returns the unmerged defaults like every other bad
+// value, so the pass is skipped instead of running without the ceiling.
+func TestLoadConfig_RepoConcurrencyCap_RejectsInvalid(t *testing.T) {
+	for _, tt := range []struct{ name, fragment string }{
+		{"null", `,"concurrencyCap":null`},
+		{"negative", `,"concurrencyCap":-1`},
+		{"fractional", `,"concurrencyCap":1.5`},
+		{"string", `,"concurrencyCap":"2"`},
+		{"boolean", `,"concurrencyCap":true`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadConfig(writeRepoCapConfig(t, tt.fragment))
+			if err == nil {
+				t.Fatal("LoadConfig accepted the value, want an error")
+			}
+			if !strings.Contains(err.Error(), "dispatch.repos[].concurrencyCap") {
+				t.Errorf("error = %q, want it to name dispatch.repos[].concurrencyCap", err)
+			}
+			if len(cfg.Repos) != 0 {
+				t.Errorf("a failed load returned repos %+v, want the unmerged defaults", cfg.Repos)
+			}
+		})
+	}
+}
+
+// The raw value survives a write-back (enroll and the config toggles marshal
+// RepoConfig), an entry with no cap gains no key, and the resolved form is not
+// serialized.
+func TestLoadConfig_RepoConcurrencyCap_RoundTripsThroughMarshal(t *testing.T) {
+	cfg, err := LoadConfig(writeRepoCapConfig(t, `,"concurrencyCap":2`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(cfg.Repos[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]json.RawMessage
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	if string(back["concurrencyCap"]) != "2" {
+		t.Errorf("marshaled concurrencyCap = %s, want 2", back["concurrencyCap"])
+	}
+	if len(back) != 4 {
+		t.Errorf("marshaled keys = %v, want repo, dir, session and concurrencyCap only", back)
+	}
+	plain, err := json.Marshal(cfg.Repos[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "oncurrencyCap") {
+		t.Errorf("a repo entry with no cap marshaled a concurrencyCap key: %s", plain)
 	}
 }

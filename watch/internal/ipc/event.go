@@ -189,6 +189,11 @@ type BabysitStatusRequest struct {
 // filesystem path. SupervisorLive is true only for a recorded, verified
 // supervisor process (PID > 0 and owned) -- a needs-input or arming state
 // with no process is not live.
+//
+// Activity (#1469) is what the supervisor is doing right now, derived from its
+// persisted state with this precedence: "needs-input" (the status needs-input),
+// then "repairing" (a live repair worker), then "waiting-for-capacity" (a live
+// capacity wait), then "monitoring". The existing keys keep their meaning.
 type BabysitStatus struct {
 	PR                  int    `json:"pr"`
 	Repo                string `json:"repo"`
@@ -197,6 +202,7 @@ type BabysitStatus struct {
 	ConflictFixAttempts int    `json:"conflictFixAttempts"`
 	FixCap              int    `json:"fixCap"`
 	SupervisorLive      bool   `json:"supervisorLive"`
+	Activity            string `json:"activity"`
 }
 
 // BabysitStatusResponse is the daemon's single reply to a

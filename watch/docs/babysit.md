@@ -145,6 +145,136 @@ remains pending and unlaunched until it can dispatch safely. Neither repair laun
 nor a changed head counts as proof that CI or review feedback has been resolved;
 the existing automerge gates still apply.
 
+The per-PR liveness above sees only this PR's windows. Another launcher can still be
+writing the same branch, so the ledger-locked admission below also checks the branch
+(`headRefName`) across launchers: a dispatch worker holding that repo and branch defers
+the repair with the reason `branch writer active`, and dispatch skips a ticket whose
+recorded pipeline branch a babysit repair holds, with the same reason. The per-PR check
+and this one run in the same critical section as the capacity check, so they cannot
+disagree. A dispatch pickup with no recorded branch skips the branch check (the ticket
+exclusivity still applies).
+
+## Capacity: the shared worker limit (#1469)
+
+Every branch-writing launch (`merge-repair`, `ci-repair`, `babysit-review`) reserves a slot
+in the shared admission ledger, `$XDG_STATE_HOME/cenci/capacity/ledger.json`, immediately
+before `launch()` runs `cenci run` (`admitRepair`, `internal/babysit/capacity.go`).
+`launch()` itself refuses to run any of the three without a permit of its own kind, so a
+new call site cannot start an uncounted worker. The slot counts against
+`dispatch.concurrencyCap` (the machine cap, default 3) and, for a repo listed in
+`dispatch.repos[]`, its `concurrencyCap` (clamped to the machine cap); a repo absent from
+`dispatch.repos[]` is bound by the machine cap only. The count is the one dispatch uses:
+ledger entries, plus running sessions no entry accounts for (manual workers included),
+plus orphaned container sessions. Supervisor processes and sessions in a non-running
+status count zero. A machine cap of `0` (the pause) admits no repair. A repair is admitted
+when one slot is free, first come first served. `babysit-attention` is a human attention
+prompt, not branch-writing work, so it is never charged and takes no permit. Nested LLM
+subagents inside a worker are governed by their own bounded fan-out, not by this cap: a
+worker holds one slot however many subagents it starts. Lowering a cap never terminates a
+worker or a repair; admission only waits until used slots drop below the new cap.
+
+Every tick of a live PR first lets the ledger release the reservations a complete tmux
+inventory proves gone (the supervisor's own socket and every socket the ledger names; a
+ledger with no entry costs no tmux read), whoever made them, so the next admitter sees the
+freed slots. The limits are re-read from the fleet `config.json` at every admission, and
+the daemon snapshot, the orphan count and the inventory are read just before the ledger
+lock is taken, never inside it.
+
+A refused repair is a **capacity wait**. The supervisor prints `PR #<pr>: <reason>; <kind>
+waits for capacity, no window opened` (the reason is `concurrency cap reached` when the host
+is full), records `capacityWait` (`reason`, `since`, `refreshedAt`) in its state for every reason, and,
+only when the reason is `concurrency cap reached` (the host is full), writes a wait record to
+the ledger. Any other refusal (a writer on the branch, the repo cap, an unreadable limit or
+snapshot) is not a wait for a slot the repair could use, so it leaves no ledger wait, and a
+wait the PR already held is dropped, so it cannot throttle dispatch into another repo. Nothing
+is consumed: `ciFixAttempts`, `conflictFixAttempts`,
+`lastRepairedCiHeadSha` and the conflict episode are unchanged, and pending feedback keys
+stay in `pendingCommentKeys`, unlaunched, with no review nonce minted. The tick stays at its
+base poll interval, so the repair is retried on the next poll. A wait record holds no slot.
+It is refreshed on every tick the repair is still refused and expires after 3 poll
+intervals (3 times the supervisor's sleep, one minute at least) without a refresh. It is
+dropped on the first tick that no longer needs a repair, when the PR merges or closes
+(before the state file is removed), and by `cenci babysit stop <pr>`. Waiting repairs have
+priority over new dispatch pickups: dispatch admits only when its free slots exceed the
+live wait records, while a repair needs a single free slot, and waiting repairs do not block
+each other.
+
+The wait reasons fail closed: whenever the host's load cannot be known, nothing is admitted
+and the reason says why.
+
+| Reason | Meaning |
+|--------|---------|
+| `concurrency cap reached` | the machine cap is full |
+| `repo concurrency cap reached` | the PR's repo reached its `repos[].concurrencyCap` |
+| `worker already reserved` | another launcher holds a slot for this PR |
+| `branch writer active` | a worker of the other launcher family (dispatch) holds this branch, or a live writer was observed |
+| `capacity observation unavailable: daemon snapshot` | the daemon is not running or did not answer a snapshot within 5s |
+| `capacity observation unavailable: orphaned container sessions` | the orphan count failed |
+| `capacity limits unreadable: <reason>` | the fleet `config.json` is unreadable or invalid |
+| `capacity launch target unresolved: <reason>` | the tmux socket or launch directory `cenci run` would use cannot be resolved (`$TMUX` with an empty socket field, or a working directory that is gone) |
+| `capacity ledger unreadable: <path>: <reason>` | the ledger is corrupt (a bad entry or wait is named by position and failing check, never a value), has an unknown schema, is symlinked, was replaced by a writer on all three read attempts (`a capacity file kept changing while it was read`) or its lock was not taken within 5s; it is never reset automatically (manual recovery: `watch/README.md`) |
+
+The entry names the socket and directory `cenci run` will record for the window, because the
+ledger matches a window by socket, name and directory: an empty recorded socket is
+`tmux.ResolveSocket()` (the first field of `$TMUX`, else the cenci socket) and the recorded
+`--dir` is made absolute (else the supervisor's working directory), the way `cenci run`
+resolves them. When the empty socket or the directory cannot be resolved, the repair waits
+with `capacity launch target unresolved: <reason>` and nothing is stored. (A recorded socket
+that is not a valid path is refused by `launch()`'s own re-check with its typed error, as
+before; its transient reservation is released.)
+
+A restarted supervisor adopts its own entry (same repo, PR and kind) left by a killed
+predecessor instead of admitting a second one; an entry of a live foreign launcher is never
+adopted. Adoption makes the entry a launch in flight again: it is `reserved` with the adopter
+as its launcher and its `updatedAt` is now, so no inventory, however fresh, can release it
+before the adopter confirms or releases it (a supervisor never adopts while this PR's worker
+is live, so a running worker keeps its `confirmed` entry). After the launch, the reservation is released only when `cenci run` never ran;
+once it ran, whatever its exit status (3 means the window exists), it is confirmed to the
+deterministic window `<PR>-<workflow>`, and only a later complete inventory showing no such
+window frees it.
+
+A `Release` or `Confirm` that fails with a transient error (the store lock was busy or the
+store was briefly unreadable) is retried once after a short pause, the same bounded retry
+dispatch uses (`capacity.RetryTransient`); a permanent error (a corrupt or unknown-schema
+ledger, an invalid request) is not retried. A `Confirm` whose entry is no longer in the
+ledger logs `capacity reservation is missing from the ledger (removed or reset)`: the
+ledger file was removed, reset or replaced, and the worker is counted only while the daemon
+sees it running. One that still fails leaves the entry `reserved` and the log line says so
+(after a transient error the next tick retries it; after a permanent one, which also fails
+the next tick's ledger read, the line points at the `capacity ledger unreadable` line and the
+manual recovery in `watch/README.md`):
+the entry's launcher is this supervisor, and a `reserved` entry is freed only when its
+launcher is dead, so no inventory frees it while the supervisor runs; it holds its slot,
+`repairWorkerLive` reads true and a repair of a different kind for the PR is refused `worker
+already reserved`. The supervisor therefore settles its own stranded entry at the start of
+the next tick, before any admission (the tick is synchronous, so nothing it launched is still
+in flight), from the inventory the tick reads anyway: for a `reserved` repair entry of this
+PR whose launcher is this supervisor (its pid and start time, the ledger's own ownership
+rule, so a reused pid is not), a worker window that is running confirms it
+(`capacity: confirmed the <kind> reservation left reserved by an earlier failed settle`), a
+complete inventory read after the entry last changed with no live worker window releases it
+(`capacity: released the <kind> reservation ...`), and an inventory that cannot say (a socket
+not read, an incomplete or malformed listing) leaves it for a later tick. A settle that fails
+again is logged as `the <kind> reservation could not be settled (<reason>); it stays
+reserved` (a confirm whose entry is gone is logged as missing from the ledger instead). An entry of another PR, another repo, a dispatch worker or another live launcher
+is never touched, and a dead launcher's entry is the adoption path's, not this one's.
+
+`cenci babysit status <pr>` adds an `activity` key to its one JSON object, derived from the
+persisted state alone (no tmux or ledger read), with this precedence: `needs-input` (the
+persisted status is `needs-input`), then `repairing` (`repairWorkerLive`), then
+`waiting-for-capacity` (a `capacityWait` refreshed within 3 poll intervals), then
+`monitoring`. Every existing key is unchanged, and the state fields `capacityWait` and
+`repairWorkerLive` are additive `omitempty` fields with no schema bump. `repairWorkerLive`
+is true when the tick launched a repair or saw a live `<PR>-ci-repair`,
+`<PR>-merge-repair` or `<PR>-babysit-review` pane. A quiet tick that needed no decision
+reads no pane inventory (#1457) and so observes nothing; it takes the flag from the ledger
+instead, after its own release of the entries a complete inventory proves gone: true while
+the ledger still holds a repair entry of this PR, so a repair that is still running keeps
+reading `repairing`, and false once that entry is released (the worker is gone). When the
+ledger cannot be read, nothing proved the worker gone and the previous value stands. A
+repair worker with no ledger entry (launched before the ledger existed) reads
+`monitoring` on a quiet tick until a tick that probes.
+
 ## PR discussion, the review worker and receipts (#1472)
 
 Ordinary PR discussion is a fourth feedback source, read next to inline comments and

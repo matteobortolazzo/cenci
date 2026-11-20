@@ -286,6 +286,7 @@ func runDispatchStatus(args []string) {
 		fmt.Printf("Memory headroom: %d%%\n", cfg.MemoryHeadroom)
 	}
 	fmt.Println(renderDailyQuotaLine(cfg.DailyQuota, capacity.NewDailyQuota(capacity.Dir()), time.Now()))
+	fmt.Print(renderCapacityLines(dispatch.ReadCapacityStatus(cfg)))
 	fmt.Print(renderFilterLines(filter))
 	fmt.Printf("Config: %s\n", cfg.Path)
 }
@@ -305,6 +306,31 @@ func renderDailyQuotaLine(limit *int, counter *capacity.DailyQuota, now time.Tim
 		return fmt.Sprintf("dailyQuota: %d per local day (daily quota state unreadable: %s)", *limit, err)
 	}
 	return fmt.Sprintf("dailyQuota: %d per local day (used %d)", *limit, used)
+}
+
+// renderCapacityLines renders the human capacity lines (#1469): `capacity:
+// <used>/<total> slots`, then one `capacity <owner/repo>: <used>/<cap> slots` line
+// per repo with a repo cap. The counts come from the admission ledger's own
+// accounting (dispatch.ReadCapacityStatus: a lock-free Peek that creates nothing,
+// the daemon snapshot and the orphan count). When one of them is unavailable the
+// count is `?` and the line carries the concrete reason in parentheses, for example
+// `capacity: ?/3 slots (capacity observation unavailable: daemon snapshot)`; the
+// status verb still exits 0 and the --json output is unchanged.
+func renderCapacityLines(st dispatch.CapacityStatus) string {
+	var b strings.Builder
+	if st.Err != "" {
+		fmt.Fprintf(&b, "capacity: ?/%d slots (%s)\n", st.Total, st.Err)
+	} else {
+		fmt.Fprintf(&b, "capacity: %d/%d slots\n", st.Used, st.Total)
+	}
+	for _, r := range st.Repos {
+		if r.Known {
+			fmt.Fprintf(&b, "capacity %s: %d/%d slots\n", r.Repo, r.Used, r.Cap)
+		} else {
+			fmt.Fprintf(&b, "capacity %s: ?/%d slots (%s)\n", r.Repo, r.Cap, r.Err)
+		}
+	}
+	return b.String()
 }
 
 // statusFilters is the `filters` object of `dispatch status --json` (#1385):

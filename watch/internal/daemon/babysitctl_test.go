@@ -283,7 +283,7 @@ func assertReasonIsHostFree(t *testing.T, reason string) {
 
 func TestBabysitControl_StatusAckCarriesTheSeamStatus(t *testing.T) {
 	d, seams := newCtlDaemon(t, resolvesTo("/h"))
-	seams.status = ipc.BabysitStatus{PR: 42, Repo: "o/r", Status: "needs-input", CIFixAttempts: 3, FixCap: 3}
+	seams.status = ipc.BabysitStatus{PR: 42, Repo: "o/r", Status: "needs-input", CIFixAttempts: 3, FixCap: 3, Activity: "needs-input"}
 
 	resp := d.handleBabysitStatus(ipc.BabysitStatusRequest{PR: "42", Repo: "o/r"})
 
@@ -626,7 +626,7 @@ func TestBabysitControl_EndToEnd_ForwardedStatusReportsTheHostState(t *testing.T
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	const want = `{"pr":42,"repo":"o/r","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":1,"fixCap":3,"supervisorLive":false}` + "\n"
+	const want = `{"pr":42,"repo":"o/r","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":1,"fixCap":3,"supervisorLive":false,"activity":"needs-input"}` + "\n"
 	if out != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}

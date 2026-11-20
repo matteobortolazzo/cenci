@@ -868,7 +868,7 @@ func TestLaunchPinsEveryWorkflowUnattended(t *testing.T) {
 			withCommands(t, nil, &calls)
 			s := State{PR: "42", Repo: "o/r", Agent: tc.agent, LaunchSession: session, LaunchDir: tc.launchDir}
 
-			if err := launch(&s, tc.workflow, tc.arg); err != nil {
+			if err := launch(&s, tc.workflow, tc.arg, grantPermit(t, tc.workflow)); err != nil {
 				t.Fatalf("launch: %v", err)
 			}
 			got, found := launchCallArgs(calls, tc.workflow)
@@ -896,7 +896,7 @@ func TestLaunchExitThreeWrapsErrWindowSpawned(t *testing.T) {
 			stubCenciRunExit(t, &calls, tc.code, "cenci run: failed")
 			s := State{PR: "42", Agent: "claude", LaunchSession: "work"}
 
-			err := launch(&s, "ci-repair", "42 x")
+			err := launch(&s, "ci-repair", "42 x", grantPermit(t, "ci-repair"))
 			if err == nil {
 				t.Fatal("launch: err = nil, want the non-zero cenci run exit")
 			}
@@ -1071,7 +1071,7 @@ func TestLaunchUsesTheRecordedSocket(t *testing.T) {
 				}
 				s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", LaunchSocket: tc.socket, LaunchDir: "/repo/root"}
 
-				if err := launch(&s, workflow, "42 x"); err != nil {
+				if err := launch(&s, workflow, "42 x", grantPermit(t, workflow)); err != nil {
 					t.Fatalf("launch: %v", err)
 				}
 

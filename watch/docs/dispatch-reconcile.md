@@ -828,6 +828,118 @@ for example `o/r#7 dispatch (claude, 7-x.md, session "s"): dispatch; legacy appr
 (unrecorded provenance)`. A note never turns a dispatch into a skip, and the
 ` skip:`/` dispatch ` substrings downstream consumers match on are unchanged.
 
+## Shared admission ledger (#1469)
+
+`dispatch.concurrencyCap` used to be checked only inside the pure `Decide`, against the
+daemon's running sessions and this pass's dispatches, so a one-shot `cenci dispatch --once`
+and the daemon's interval pass could both take the last slot, and a babysit repair took none.
+Every dispatch launch now reserves a slot in the shared admission ledger
+(`$XDG_STATE_HOME/cenci/capacity/ledger.json`, `internal/capacity/ledger.go`) that the babysit
+supervisors use too (`watch/docs/babysit.md`). The gate order above is unchanged: `Decide`'s
+cap gate stays as a **pre-filter**. Its count is never larger than the ledger's, so it can
+never refuse a launch `Admit` would grant, and `Admit` is the authoritative check.
+
+- **Repo sub-check inside the cap gate.** In the cap-gate slot (after plan authorization,
+  before the daily quota) `repoCapGated` runs ahead of the machine comparison: this pass's
+  dispatches into the repo against its effective cap, the lower of `repos[].concurrencyCap`
+  and `dispatch.concurrencyCap`, else `repo concurrency cap reached`. The repo check sits
+  inside the slot so a capped repo's later tickets never use machine slots another repo needs
+  (machine cap 3, repo A capped at 1, 4 eligible tickets each: one pass launches 1 in A and 2
+  in B). A repo cap above the machine cap is clamped to it (left to the machine check), a repo
+  cap of `0` admits nothing for that repo while other repos still admit, and a machine cap of
+  `0` (the pause) keeps its own `concurrency cap reached`.
+- **Admission after `Decide`.** For each decision that would spawn and carries an explicit
+  eligible session verdict, `applyDispatch` calls `Admit` before the decision table is logged,
+  so a refusal is rewritten to an `ActionSkip` and every ticket keeps exactly one
+  `<owner/repo>#<n> skip: <reason>` line. A ticket any `Decide` gate skips makes no `Admit`
+  call. A decision with no session verdict (the spawn loop would leave it untouched, see
+  **Spawn** above) is never admitted, so it cannot leave a reservation behind. A dry run
+  admits nothing, writes nothing and never creates the ledger.
+- **What `Admit` checks, in order, under one ledger lock.** The release rules on the caller's
+  pre-read inventory; ticket exclusivity (`worker already reserved`); the branch-writer check
+  (`branch writer active`: the same repo and branch held by a babysit repair; the branch is
+  `Ticket.Branch`, read from the pipeline state `probeStageState` already reads, and a fresh
+  pickup with no recorded branch skips this check while the ticket check still applies); the
+  repo cap (`repo concurrency cap reached`); the machine cap (`concurrency cap reached`). A
+  dispatch launch needs free slots above the live babysit wait records (waiting repairs have
+  priority and hold no slot); a repair needs one. Usage counts a ledger-held worker that also
+  shows up as a running daemon session once, plus running sessions with no entry (manual
+  workers), plus orphaned container sessions; supervisors and non-running sessions count
+  zero. Per-repo usage is that repo's ledger entries plus this pass's admissions.
+- **Everything is read before the lock.** The daemon snapshot, the orphan count and the tmux
+  inventory of the ledger's sockets are read once per pass before the first `Admit`, with each
+  socket's `ReadAt` taken just before its listing. The limits are re-read from the config file
+  at every admission, so a lowered cap applies at once and kills nothing: a reload from 3 to 1
+  with 3 workers live records no kill call and admits nothing until used slots drop below 1.
+  No subprocess I/O and no second lock happens inside the ledger lock, and #1566's
+  daily-quota `Record` is never called inside it.
+- **Fail closed.** A nil snapshot, a failed orphan probe, unreadable limits or an unreadable
+  ledger admits nothing, and each refused ticket logs its own skip: `capacity observation
+  unavailable: daemon snapshot` (or `orphaned container sessions`), `capacity limits
+  unreadable: <reason>`, `capacity ledger unreadable: <path>: <reason>`. The ledger is
+  unreadable when it fails to parse, carries an unknown schema, is over its size bound, is
+  symlinked, is replaced by a writer on all three read attempts (`a capacity file kept
+  changing while it was read`, distinct from the symlink and special-file error), or its lock
+  is not taken within 5s. A parse failure inside one entry or wait names its position and the
+  failing check but no value (`a capacity file is corrupt: entry 3: launcher pid out of
+  range`; positions count from 1). It is never reset automatically; manual recovery is in
+  `watch/README.md`. A refused admission leaves the persisted daily-quota count
+  unchanged, because the quota is recorded only after a successful spawn.
+- **Settle.** `applyDispatch` wraps the controller to see whether a tmux window creation was
+  attempted. A launch that failed before `NewWindow` ran (and a failed launch-record clear or
+  resume claim, which happen before the spawn) is **released**: the ledger holds zero entries
+  for that ticket. A launch that succeeded, ended with `run.ErrWindowSpawned` (`cenci run` exit
+  3: window spawned, setup failed) or failed inside `NewWindow` is **confirmed** to the
+  deterministic window `<number>-implement` on the pass's socket, and holds its slot until a
+  complete inventory proves no worker. The entry names the directory `cenci run` will record
+  for the window (`repos[].dir` trimmed and made absolute, else the pass's working directory;
+  a directory that cannot be resolved refuses the admission with `capacity launch target
+  unresolved: <reason>`), because the ledger matches a window by socket, name and directory.
+  A failed `Release` or `Confirm` is retried once (a short pause, never inside the ledger
+  lock) before it is logged, but only when the error is transient (`capacity.IsTransient`: the
+  store lock was busy or the store was briefly unreadable); a permanent one (a corrupt,
+  over-size or unknown-schema ledger, an invalid request, an entry that is no longer held) is
+  not retried, and babysit's settle uses the same helper (`capacity.RetryTransient`). A
+  `Confirm` whose entry is no longer in the ledger logs `capacity reservation is missing from
+  the ledger (removed or reset); the worker is live but not counted by the ledger until the
+  daemon sees it running` and nothing stays reserved. No inventory can have released that
+  entry: a `reserved` entry whose launcher (this process) is alive is never freed by one, so
+  the file was removed, reset or replaced; the worker counts only while the daemon sees it
+  running. A `Release` or `Confirm` that still fails leaves the entry `reserved`, which holds
+  the slot (conservative), and is logged with what remains: a `reserved` entry is freed only
+  when its launcher is dead, and the launcher is this dispatch process, so an inventory alone
+  never frees it while the process runs. A one-shot pass clears it once it has exited, the
+  daemon after a restart, or `ledger.json` is removed by hand after confirming no worker is
+  live (`watch/README.md`). A settle that failed is not retried by a later pass (documented
+  residual): the next pass of the same daemon does not touch the entry, which is why the
+  entry clears only by one of those three routes.
+- **Reconcile housekeeping.** `RunReconcileOnce` calls `reconcileCapacity` first (not on a dry
+  run, and not stopped by a held reconcile state): it reads the ledger without a lock, and with
+  no entry does nothing and reads no tmux. Otherwise it reads the inventory of each ledger
+  socket and calls `Reconcile`, logging `reconcile: capacity: released the <kind> reservation
+  of "<owner/repo>#<n>" (no worker window "<name>")` per freed entry (the ledger's strings are
+  printed quoted, and a ledger entry whose strings carry a control character or are over-long
+  makes the whole ledger unreadable), so whichever launcher
+  admits next sees the freed slots. The release rules are conservative. A confirmed entry is
+  freed by a complete inventory that lists no matching live window (a window whose every pane
+  is dead does not hold it). A `reserved` entry (the launcher never confirmed) also needs a
+  dead launcher: its pid gone, or its `/proc/<pid>/stat` start time different (a reused pid is
+  a dead launcher; where the start time cannot be read, liveness alone decides). A missing
+  pane while the launcher is live proves nothing. An inventory that failed, dropped a malformed
+  row, never read the entry's socket, or was read before the entry last changed releases
+  nothing and is reported (`capacity: the tmux inventory of socket "<s>" is unreadable (<err>);
+  reservations on it are kept`). `ErrNoServer` on a socket is a complete, empty inventory. An
+  entry with an old `createdAt` still counts across a daemon restart while its launcher is
+  live or its pane is present.
+- **Skip reasons added.** `worker already reserved`, `repo concurrency cap reached`,
+  `branch writer active`, `capacity ledger unreadable: <path>: <reason>`,
+  `capacity observation unavailable: <what>`, `capacity limits unreadable: <reason>`. They
+  keep the `<owner/repo>#<n> skip: <reason>` shape, and `concurrency cap reached` is
+  unchanged. `cenci dispatch status` prints `capacity: <used>/<total> slots` and one
+  `capacity <owner/repo>: <used>/<cap> slots` line per repo with a repo cap (the effective
+  cap), from a lock-free read that creates no ledger, with `?` and the concrete reason when
+  something cannot be read; it still exits 0.
+
 ## Escalation recovery across restarts (#1464)
 
 The planner-escalation resume (#827/#849/#882) keeps no in-memory state, so it survives

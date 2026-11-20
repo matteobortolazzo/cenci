@@ -120,7 +120,9 @@ func newAdapterLaunchWorld(t *testing.T, pluginList string, installAdapter bool)
 		`printf '%s\000' "$#" "$@" >> `+exectest.ShellQuote(w.tmuxLog)+"\n"+
 		// `cenci run` always leads with `-S <socket>` (#1431): drop it after logging.
 		`if [ "$1" = -S ]; then shift 2; fi`+"\n"+
-		`case "$1" in display-message) echo 0 ;; list-panes) printf '1-implement\t0\t\n' ;; esac`+"\nexit 0\n")
+		// #1469: capacity admission lists the whole server (`list-panes -a`) through
+		// tmux.ListCleanupInventory; no panes is a complete, empty inventory.
+		`case "$1" in display-message) echo 0 ;; list-panes) if [ "$2" != -a ]; then printf '1-implement\t0\t\n'; fi ;; esac`+"\nexit 0\n")
 
 	// Fake gh: a PR with a failing check at head "abc", no comments or reviews;
 	// anything else fails (and is logged, so an unexpected call is visible).
@@ -171,6 +173,8 @@ func newAdapterLaunchWorld(t *testing.T, pluginList string, installAdapter bool)
 			_ = conn.Close()
 		}
 	}()
+	// #1469: a repair is admitted only with a daemon snapshot to count against.
+	serveCapacityDaemon(t, socketDir)
 
 	w.env = []string{
 		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),

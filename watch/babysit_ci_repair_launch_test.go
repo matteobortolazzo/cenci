@@ -123,7 +123,10 @@ func writeCIRepairFakeTmux(t *testing.T, binDir, ctlDir, logPath string) {
 		`case "$1" in`+"\n"+
 		`has-session) exit 0 ;;`+"\n"+
 		`display-message) if [ -e `+ctl("grouped")+` ]; then echo 1; else echo 0; fi ;;`+"\n"+
-		`list-panes) if [ -e `+ctl("panes")+` ]; then cat `+ctl("panes")+`; else echo 'fake tmux: lost server' >&2; exit 1; fi ;;`+"\n"+
+		// #1469: capacity admission lists the whole server (`list-panes -a`) through
+		// tmux.ListCleanupInventory; no panes is a complete, empty inventory. Only
+		// the babysit pane inventory (`list-panes -s`) is steered by `panes`.
+		`list-panes) if [ "$2" = -a ]; then :; elif [ -e `+ctl("panes")+` ]; then cat `+ctl("panes")+`; else echo 'fake tmux: lost server' >&2; exit 1; fi ;;`+"\n"+
 		`set-window-option) if [ -e `+exectest.ShellQuote(ctlDir)+`/"fail-$4" ]; then echo "fake tmux: refused $4" >&2; exit 1; fi ;;`+"\n"+
 		"esac\nexit 0\n")
 }
@@ -234,8 +237,10 @@ func newCIRepairWorld(t *testing.T, cell ciRepairCell, opts ciRepairWorldOpts) *
 		ciRepairWrite(t, adapter, "# ci-repair Codex procedure\n")
 	}
 
-	env, home, _ := openTestEnv(t, w.binDir, writeAssetFixture(t))
+	env, home, socketDir := openTestEnv(t, w.binDir, writeAssetFixture(t))
 	w.home = home
+	// #1469: a repair is admitted only with a daemon snapshot to count against.
+	serveCapacityDaemon(t, socketDir)
 	if cell.agent == "codex" {
 		stageCodexAuth(t, home)
 	}

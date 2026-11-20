@@ -740,6 +740,14 @@ type Ticket struct {
 	// mirrors Plan.CommitsBehind above).
 	StageProbe StageProbe
 
+	// Branch is the pipeline branch recorded in the ticket's persisted state
+	// (collector-filled, #1469, from the same state-file read as Stage). It is
+	// the branch the dispatched session writes, so admission checks it against a
+	// babysit repair that holds the same branch. Empty for a fresh pickup with no
+	// recorded branch, which skips that check; the ticket-level exclusivity still
+	// applies.
+	Branch string
+
 	// MainSync classifies the once-per-pass local `main` sync outcome for
 	// this ticket's repo (collector-filled, #822; mirrors StageProbe above).
 	// Stays MainSyncSkipped (the zero value) when no sync map was supplied

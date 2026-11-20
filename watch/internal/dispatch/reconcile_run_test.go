@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -14,7 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc/windowproctest"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
@@ -2577,5 +2580,189 @@ func TestRunReconcileOnce_OldAccountAttemptsDoNotCountAfterAccountSwitch(t *test
 	}
 	if hasFailed(res, "o/r", 42) {
 		t.Error("old-account attempt comments drove the ticket to dispatch-failed")
+	}
+}
+
+// -- the reconciler releases ledger entries a complete inventory proves gone (#1469)
+
+// seedLedgerAt admits (and, with confirm, confirms to the request's window) one
+// entry in the ledger at dir as of at, the way a launcher that ran then left it.
+func seedLedgerAt(t *testing.T, dir string, at time.Time, req capacity.Request, confirm bool) {
+	t.Helper()
+	old := capacity.NewLedger(dir, capacity.Options{Now: func() time.Time { return at }})
+	req.Limits = capacity.Limits{Machine: 99}
+	d, err := old.Admit(req)
+	if err != nil || !d.Admitted {
+		t.Fatalf("seeding the ledger: admitted=%v err=%v reason=%q", d.Admitted, err, d.Reason)
+	}
+	if confirm {
+		if err := old.Confirm(d.Permit, capacity.Confirmation{Socket: req.Socket, Window: req.Window}); err != nil {
+			t.Fatalf("confirming the seeded entry: %v", err)
+		}
+	}
+}
+
+// exitedPID is the pid of a process that has run and exited: a dead launcher.
+func exitedPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("running a short-lived process: %v", err)
+	}
+	return cmd.Process.Pid
+}
+
+func isolateSocketDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CENCI_SOCKET_DIR", dir)
+}
+
+func reconcileCapacityPass(t *testing.T, dryRun bool) (string, error) {
+	t.Helper()
+	isolateSocketDir(t)
+	var buf bytes.Buffer
+	_, err := RunReconcileOnce(reconcileConfig(), &fakeMutator{}, dryRun, &buf, &memStore{})
+	return buf.String(), err
+}
+
+func heldWindows(t *testing.T, l *capacity.Ledger) []string {
+	t.Helper()
+	var out []string
+	for _, e := range heldEntries(t, l) {
+		out = append(out, e.Window)
+	}
+	return out
+}
+
+// After a restart the entries a launcher left still count while their worker is
+// there, however old; the first complete inventory that shows no worker frees
+// the rest.
+func TestRunReconcileOnceKeepsLiveWorkersAndReleasesProvenGone(t *testing.T) {
+	l, dir := useLedger(t)
+	old := time.Now().Add(-3 * time.Hour)
+	seedLedgerAt(t, dir, old, capacity.Request{Kind: capacity.KindImplement, Repo: "o/r", Ticket: 1, Socket: "sock", Window: "1-implement"}, true)
+	seedLedgerAt(t, dir, old, capacity.Request{Kind: capacity.KindImplement, Repo: "o/r", Ticket: 2, Socket: "sock", Window: "2-implement"}, true)
+	useLiveWindows(t, "1-implement")
+
+	log, err := reconcileCapacityPass(t, false)
+
+	if err != nil {
+		t.Fatalf("RunReconcileOnce: %v\nlog:\n%s", err, log)
+	}
+	if got := heldWindows(t, l); len(got) != 1 || got[0] != "1-implement" {
+		t.Errorf("held windows = %v, want only 1-implement (2-implement has no window)", got)
+	}
+}
+
+// ErrNoServer is a complete, empty inventory: nothing is running.
+func TestRunReconcileOnceTreatsNoTmuxServerAsAnEmptyInventory(t *testing.T) {
+	l, dir := useLedger(t)
+	seedLedgerAt(t, dir, time.Now().Add(-time.Hour), capacity.Request{Kind: capacity.KindImplement, Repo: "o/r", Ticket: 1, Socket: "sock", Window: "1-implement"}, true)
+	useInventoryFn(t, func(string) (tmux.CleanupInventory, error) { return tmux.CleanupInventory{}, tmux.ErrNoServer })
+
+	if log, err := reconcileCapacityPass(t, false); err != nil {
+		t.Fatalf("RunReconcileOnce: %v\nlog:\n%s", err, log)
+	}
+
+	if got := heldWindows(t, l); len(got) != 0 {
+		t.Errorf("held windows = %v, want none", got)
+	}
+}
+
+// (P7) A failed or malformed inventory retains every reservation and reports why.
+func TestRunReconcileOnceKeepsReservationsOnAnUnreadableInventory(t *testing.T) {
+	tests := []struct {
+		name    string
+		inv     func(string) (tmux.CleanupInventory, error)
+		wantLog string
+	}{
+		{"a failed listing", func(string) (tmux.CleanupInventory, error) {
+			return tmux.CleanupInventory{}, errors.New("tmux list-panes: timed out")
+		}, "tmux list-panes: timed out"},
+		{"a malformed row", func(string) (tmux.CleanupInventory, error) {
+			return tmux.CleanupInventory{Dropped: []string{`window "@3": pane_dead "x" is not 0 or 1`}}, nil
+		}, `window "@3": pane_dead "x" is not 0 or 1`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l, dir := useLedger(t)
+			seedLedgerAt(t, dir, time.Now().Add(-time.Hour), capacity.Request{Kind: capacity.KindImplement, Repo: "o/r", Ticket: 1, Socket: "sock", Window: "1-implement"}, true)
+			useInventoryFn(t, tt.inv)
+
+			log, err := reconcileCapacityPass(t, false)
+
+			if err != nil {
+				t.Fatalf("RunReconcileOnce: %v\nlog:\n%s", err, log)
+			}
+			if got := heldWindows(t, l); len(got) != 1 {
+				t.Errorf("held windows = %v, want the reservation kept", got)
+			}
+			if !strings.Contains(log, tt.wantLog) {
+				t.Errorf("log does not report the inventory problem %q:\n%s", tt.wantLog, log)
+			}
+		})
+	}
+}
+
+// (P20) A launcher confirmed dead that crashed before creating its worker is
+// released on the first complete inventory showing no worker; a missing window
+// while the launcher is still live proves nothing.
+func TestRunReconcileOnceReleasesAReservationOnlyOnceItsLauncherIsDead(t *testing.T) {
+	l, dir := useLedger(t)
+	old := time.Now().Add(-3 * time.Hour)
+	seedLedgerAt(t, dir, old, capacity.Request{Kind: capacity.KindImplement, Repo: "o/r", Ticket: 1, Socket: "sock", Window: "1-implement", Launcher: os.Getpid()}, false)
+	seedLedgerAt(t, dir, old, capacity.Request{Kind: capacity.KindImplement, Repo: "o/r", Ticket: 2, Socket: "sock", Window: "2-implement", Launcher: exitedPID(t)}, false)
+	useLiveWindows(t)
+
+	if log, err := reconcileCapacityPass(t, false); err != nil {
+		t.Fatalf("RunReconcileOnce: %v\nlog:\n%s", err, log)
+	}
+
+	entries := heldEntries(t, l)
+	if len(entries) != 1 || entries[0].Ticket != 1 {
+		t.Errorf("held entries = %+v, want only #1 (its launcher is this live process; #2's launcher is dead)", entries)
+	}
+}
+
+// A dry run releases nothing and reads nothing it does not need.
+func TestRunReconcileOnceDryRunLeavesTheLedgerAlone(t *testing.T) {
+	l, dir := useLedger(t)
+	seedLedgerAt(t, dir, time.Now().Add(-time.Hour), capacity.Request{Kind: capacity.KindImplement, Repo: "o/r", Ticket: 1, Socket: "sock", Window: "1-implement"}, true)
+	useLiveWindows(t)
+
+	if log, err := reconcileCapacityPass(t, true); err != nil {
+		t.Fatalf("RunReconcileOnce: %v\nlog:\n%s", err, log)
+	}
+
+	if got := heldWindows(t, l); len(got) != 1 {
+		t.Errorf("held windows = %v after a dry run, want the entry untouched", got)
+	}
+}
+
+// An unreadable ledger is reported and never reset, and the pass carries on.
+func TestRunReconcileOnceReportsAnUnreadableLedgerAndKeepsIt(t *testing.T) {
+	l, dir := useLedger(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ledger.json")
+	if err := os.WriteFile(path, []byte("{definitely not a ledger"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	log, err := reconcileCapacityPass(t, false)
+
+	if err != nil {
+		t.Fatalf("RunReconcileOnce: %v\nlog:\n%s", err, log)
+	}
+	if want := "capacity ledger unreadable: " + l.Path() + ": " + capacity.ErrCorrupt.Error(); !strings.Contains(log, want) {
+		t.Errorf("log does not say %q:\n%s", want, log)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "{definitely not a ledger" {
+		t.Errorf("the corrupt ledger was rewritten: %q", got)
 	}
 }
