@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -45,15 +46,22 @@ var (
 	ErrMalformed       = errors.New("ps output is malformed")
 )
 
-// sharedServerMarkers identifies the shared Codex app-server: the classification
-// looks only at the nearest Codex ancestor, and that ancestor is the shared
-// server when its command line contains an entry. Which ancestor the shared-server
-// marker identifies must be settled by the native record in
-// watch/docs/codex-tmux-association.md before its "Marker identifying the shared
-// app-server" row is filled. The table stays empty until then, because a guessed
-// marker that misses the shared server would bring back the cross-association of
-// simultaneous clients.
-var sharedServerMarkers []string
+// sharedServerMarkersByOS identifies the shared Codex app-server, per
+// runtime.GOOS: the classification looks only at the nearest Codex ancestor, and
+// that ancestor is the shared server when its command line contains an entry.
+// "app-server" comes from the native record in
+// watch/docs/codex-tmux-association.md (#1550): it was in the nearest Codex
+// ancestor's argv in every shared-app-server observation, absent from every
+// single-client one, and read whole from Linux `ps`. A platform has an entry
+// only where the marker was observed whole: on any other platform the table
+// resolves to empty and no read reports a single client, because a marker that
+// a truncated `args` column hides would make the shared server look like a
+// client and bring back the cross-association of simultaneous clients. A client
+// whose own argv contains the marker (a prompt naming it) is unproven, the safe
+// direction.
+var sharedServerMarkersByOS = map[string][]string{
+	"linux": {"app-server"},
+}
 
 // Options injects the seams of ReadWith.
 type Options struct {
@@ -63,6 +71,8 @@ type Options struct {
 	Run func(ctx context.Context) ([]byte, error)
 	// Markers overrides the production marker table when non-empty.
 	Markers []string
+	// GOOS selects the production table's platform; empty means runtime.GOOS.
+	GOOS string
 }
 
 // Result is what a successful read yields.
@@ -71,7 +81,7 @@ type Result struct {
 	// the first process whose parent is 0).
 	PIDs []string
 	// SingleClient is true only when a nearest Codex ancestor exists, the marker
-	// table is non-empty and that ancestor matches no marker.
+	// table of the platform is non-empty and that ancestor matches no marker.
 	SingleClient bool
 }
 
@@ -108,7 +118,11 @@ func ReadWith(ctx context.Context, opts Options) (Result, error) {
 	}
 	markers := opts.Markers
 	if len(markers) == 0 {
-		markers = sharedServerMarkers
+		goos := opts.GOOS
+		if goos == "" {
+			goos = runtime.GOOS
+		}
+		markers = sharedServerMarkersByOS[goos]
 	}
 	pids := make([]string, len(chain))
 	for i, pid := range chain {

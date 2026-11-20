@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -1654,9 +1655,10 @@ func codexInTmux(payload string, env ...string) rawNotify {
 // P30: only pids cross IPC. The fake ps prints the notify process's own pid
 // ($PPID of the fake), then a fixed chain to pid 1 whose command lines carry a
 // sentinel. The wire line holds that chain's pids in order, no sentinel anywhere,
-// no single-client key (the production marker table is empty, so a real hook
-// never reports one), and no key outside the event allowlist. ps ran once with
-// the one bounded command.
+// and no key outside the event allowlist. The nearest Codex ancestor carries no
+// shared-server marker, so the one boolean says single client where the
+// production table has a marker (Linux, #1550) and is absent on every other
+// platform. ps ran once with the one bounded command.
 func TestNotifyCodexSendsAncestryPIDsOnlyAndNoCommandLines(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "notify-pid")
 	pathEnv, marker := fakeAncestryPS(t, `echo "$PPID" > `+exectest.ShellQuote(pidFile)+`
@@ -1685,15 +1687,16 @@ EOF`)
 	if !reflect.DeepEqual(ev.AncestryPIDs, want) {
 		t.Errorf("AncestryPIDs = %v, want %v: the chain from the notify process up to pid 1", ev.AncestryPIDs, want)
 	}
-	if ev.AncestrySingleClient || strings.Contains(line, "ancestry_single_client") {
-		t.Errorf("raw line = %s, want no ancestry_single_client key: the empty production marker table never reports a single client", line)
+	wantSingle := runtime.GOOS == "linux"
+	if ev.AncestrySingleClient != wantSingle || strings.Contains(line, "ancestry_single_client") != wantSingle {
+		t.Errorf("raw line = %s, want ancestry_single_client present and true only on Linux (GOOS %s)", line, runtime.GOOS)
 	}
 	if strings.Contains(line, psSentinel) || strings.Contains(line, "secret") || strings.Contains(line, "tmux: server") {
 		t.Errorf("raw line = %s, want no command line anywhere on the wire", line)
 	}
 	allowed := map[string]bool{
 		"event_type": true, "session_id": true, "agent": true, "tmux_pane": true, "tmux_socket": true,
-		"tmux_server_pid": true, "ancestry_pids": true, "timestamp": true,
+		"tmux_server_pid": true, "ancestry_pids": true, "ancestry_single_client": true, "timestamp": true,
 	}
 	for key := range wireKeys(t, line) {
 		if !allowed[key] {
