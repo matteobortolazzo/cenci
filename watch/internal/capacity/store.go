@@ -39,6 +39,10 @@ var (
 	// ErrNotRegular means a store file is a symlink, not a regular file, or
 	// larger than the size cap.
 	ErrNotRegular = errors.New("a capacity file is not a regular file of bounded size")
+	// ErrRaced means a lock-free read lost every attempt to a writer replacing
+	// the file. It is not a hostile path (that is ErrNotRegular) and the read
+	// still fails closed.
+	ErrRaced = errors.New("a capacity file kept changing while it was read")
 	// ErrCorrupt means a store file does not decode strictly.
 	ErrCorrupt = errors.New("a capacity file is corrupt")
 	// ErrUnknownSchema means a store file carries a schema this build does not
@@ -56,6 +60,11 @@ const (
 	lockPoll           = 10 * time.Millisecond
 	lockName           = ".lock"
 )
+
+// afterReadLstat is a test seam called between a lock-free read's Lstat and its
+// open: the moment a concurrent writer's rename can swap the file. Nil in
+// production.
+var afterReadLstat func()
 
 // Dir returns <S>/cenci/capacity where <S> is $XDG_STATE_HOME when it is
 // absolute, else $HOME/.local/state. It returns "" when neither resolves.
@@ -165,8 +174,9 @@ func (s *Store) check() (present bool, err error) {
 }
 
 // lock takes the whole-store flock, polling so a stuck holder cannot hang a
-// pass past the timeout. Without create, an absent lock file means no writer
-// has ever run, so there is nothing to wait for and unlock is a no-op.
+// pass past the timeout. Without create, an absent lock file with no data file
+// beside it means no writer has ever run, so there is nothing to wait for and
+// unlock is a no-op (withReadLock decides which case it is).
 func (s *Store) lock(create bool) (unlock func(), err error) {
 	flags := os.O_RDWR | syscall.O_NOFOLLOW
 	if create {
@@ -208,8 +218,12 @@ func (s *Store) WithLock(fn func() error) error {
 }
 
 // withReadLock runs fn under the lock when the store already exists, and
-// creates nothing: an absent store is read as empty.
-func (s *Store) withReadLock(fn func() error) error {
+// creates neither the store directory nor the data file name: an absent store is
+// read as empty. When name exists the lock is always taken, creating `.lock` if
+// it was removed (a no-op lock there would let a read-modify-write of an
+// existing file race a writer); when name is absent there is nothing to protect
+// and an absent `.lock` is left absent.
+func (s *Store) withReadLock(name string, fn func() error) error {
 	present, err := s.check()
 	if err != nil {
 		return err
@@ -217,7 +231,8 @@ func (s *Store) withReadLock(fn func() error) error {
 	if !present {
 		return fn()
 	}
-	unlock, err := s.lock(false)
+	_, statErr := os.Lstat(filepath.Join(s.dir, name))
+	unlock, err := s.lock(!errors.Is(statErr, fs.ErrNotExist))
 	if err != nil {
 		return err
 	}
@@ -231,46 +246,82 @@ func validName(name string) bool {
 
 // ReadFile reads the store file name without creating or repairing anything.
 // An absent store or file is (nil, false, nil). A file that is a symlink, not a
-// regular file or over the size cap is ErrNotRegular, and exists is true.
+// regular file or over the size cap is ErrNotRegular, and exists is true; one
+// replaced by a writer on every attempt is ErrRaced.
 func (s *Store) ReadFile(name string) (data []byte, exists bool, err error) {
+	return s.readFileLimit(name, maxFileBytes)
+}
+
+// readAttempts bounds a lock-free read that keeps losing a race with a writer's
+// rename.
+const readAttempts = 3
+
+// readFileLimit is ReadFile with a per-file size cap: ReadFile keeps the
+// 4096-byte cap of daily-quota.json, and the ledger reads with its own larger
+// one. Every other rule (no symlink, bounded read) is unchanged. A writer's
+// rename between the Lstat and the open leaves the opened file a different one
+// than the Lstat saw; that is a race, not a refusal, so the read starts over (at
+// most readAttempts times, with no pause: the replacement is already complete).
+// A read that loses every attempt is ErrRaced, not ErrNotRegular, so a log can
+// tell a busy writer from a symlink or special file; it still fails closed.
+func (s *Store) readFileLimit(name string, limit int64) (data []byte, exists bool, err error) {
+	for range readAttempts {
+		var raced bool
+		data, exists, raced, err = s.readFileOnce(name, limit)
+		if !raced {
+			return data, exists, err
+		}
+	}
+	return nil, true, ErrRaced
+}
+
+// readFileOnce is one read attempt. raced reports that the file was replaced
+// between the Lstat and the open, the only outcome worth another attempt.
+func (s *Store) readFileOnce(name string, limit int64) (data []byte, exists, raced bool, err error) {
 	if !validName(name) {
-		return nil, false, ErrIO
+		return nil, false, false, ErrIO
 	}
 	present, err := s.check()
 	if err != nil || !present {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	path := filepath.Join(s.dir, name)
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 	if err != nil {
-		return nil, true, ErrIO
+		return nil, true, false, ErrIO
 	}
-	if !info.Mode().IsRegular() || info.Size() > maxFileBytes {
-		return nil, true, ErrNotRegular
+	if afterReadLstat != nil {
+		afterReadLstat()
+	}
+	if !info.Mode().IsRegular() || info.Size() > limit {
+		return nil, true, false, ErrNotRegular
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, syscall.ELOOP) {
-		return nil, true, ErrNotRegular
+		return nil, true, false, ErrNotRegular
 	}
 	if err != nil {
-		return nil, true, ErrIO
+		return nil, true, false, ErrIO
 	}
 	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() || !os.SameFile(info, fi) {
-		return nil, true, ErrNotRegular
+	if err != nil || !fi.Mode().IsRegular() {
+		return nil, true, false, ErrNotRegular
 	}
-	buf, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
+	if !os.SameFile(info, fi) {
+		return nil, true, true, ErrRaced
+	}
+	buf, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
-		return nil, true, ErrIO
+		return nil, true, false, ErrIO
 	}
-	if len(buf) > maxFileBytes {
-		return nil, true, ErrNotRegular
+	if int64(len(buf)) > limit {
+		return nil, true, false, ErrNotRegular
 	}
-	return buf, true, nil
+	return buf, true, false, nil
 }
 
 // WriteFile creates and verifies the store, then replaces the store file name

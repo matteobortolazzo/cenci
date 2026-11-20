@@ -18,7 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // TestMain pins the fleetConfigPath seam to "" (disabled) for every test in
@@ -33,17 +35,50 @@ import (
 // It also pins the #1457 worker-inventory seams: tmuxPaneInventory reports a
 // session with no repair worker, and gitCommonDir fails, so no test runs a real
 // tmux or git unless it installs its own stub or fake binary.
+//
+// #1469: every babysit repair launch now goes through the shared admission
+// ledger, so TestMain also keeps the whole admission path off the real host
+// (watch/docs/test-isolation.md). XDG_STATE_HOME points at a temp directory, so
+// the default ledger (capacity.Dir) is a throwaway one, and the daemon snapshot,
+// orphan count, tmux inventory and limits seams answer "an empty host with the
+// default cap of 3". An entry a test leaves in that ledger is released by the
+// next tick, whose inventory is complete and shows no window. Tests that
+// exercise admission install their own seams through newCapHarness.
 func TestMain(m *testing.M) {
 	original := fleetConfigPath
 	originalInventory := tmuxPaneInventory
 	originalCommonDir := gitCommonDir
+	originalLedger, originalSnapshot, originalOrphans := capacityLedgerFn, daemonSnapshotFn, orphanCountFn
+	originalCleanup, originalLimits := cleanupInventoryFn, limitsPath
+	originalState, hadState := os.LookupEnv("XDG_STATE_HOME")
+	stateHome, err := os.MkdirTemp("", "babysit-state-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "babysit TestMain:", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("XDG_STATE_HOME", stateHome); err != nil {
+		fmt.Fprintln(os.Stderr, "babysit TestMain:", err)
+		os.Exit(1)
+	}
 	fleetConfigPath = func() string { return "" }
 	tmuxPaneInventory = func(string, string) (string, error) { return noWorkerInventory, nil }
 	gitCommonDir = func(string) (string, error) { return "", errors.New("gitCommonDir is not stubbed in this test") }
+	daemonSnapshotFn = func() ([]capacity.Session, error) { return nil, nil }
+	orphanCountFn = func() (int, error) { return 0, nil }
+	cleanupInventoryFn = func(string) (tmux.CleanupInventory, error) { return tmux.CleanupInventory{}, nil }
+	limitsPath = func() string { return filepath.Join(stateHome, "no-config.json") }
 	code := m.Run()
 	fleetConfigPath = original
 	tmuxPaneInventory = originalInventory
 	gitCommonDir = originalCommonDir
+	capacityLedgerFn, daemonSnapshotFn, orphanCountFn = originalLedger, originalSnapshot, originalOrphans
+	cleanupInventoryFn, limitsPath = originalCleanup, originalLimits
+	if hadState {
+		_ = os.Setenv("XDG_STATE_HOME", originalState)
+	} else {
+		_ = os.Unsetenv("XDG_STATE_HOME")
+	}
+	_ = os.RemoveAll(stateHome)
 	os.Exit(code)
 }
 
@@ -5445,16 +5480,17 @@ func TestStopRepo_ClassifiesFailuresBySentinel(t *testing.T) {
 func TestStatusRepo_ReportsPersistedStateAndLiveness(t *testing.T) {
 	const repo = "o/r"
 	for _, tc := range []struct {
-		name      string
-		state     State
-		owned     bool
-		wantLive  bool
-		wantState string
+		name         string
+		state        State
+		owned        bool
+		wantLive     bool
+		wantState    string
+		wantActivity string
 	}{
-		{"pid 0 needs-input is not live", State{PR: "42", Status: "needs-input"}, true, false, "needs-input"},
-		{"pid 0 arming is not live", State{PR: "42", Status: "arming"}, true, false, "arming"},
-		{"owned pid is live", State{PR: "42", PID: 4242, Status: "running"}, true, true, "running"},
-		{"unowned pid is not live", State{PR: "42", PID: 4242, Status: "running"}, false, false, "running"},
+		{"pid 0 needs-input is not live", State{PR: "42", Status: "needs-input"}, true, false, "needs-input", "needs-input"},
+		{"pid 0 arming is not live", State{PR: "42", Status: "arming"}, true, false, "arming", "monitoring"},
+		{"owned pid is live", State{PR: "42", PID: 4242, Status: "running"}, true, true, "running", "monitoring"},
+		{"unowned pid is not live", State{PR: "42", PID: 4242, Status: "running"}, false, false, "running", "monitoring"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -5467,7 +5503,7 @@ func TestStatusRepo_ReportsPersistedStateAndLiveness(t *testing.T) {
 			if err != nil {
 				t.Fatalf("StatusRepo: %v", err)
 			}
-			want := ipc.BabysitStatus{PR: 42, Repo: repo, Status: tc.wantState, CIFixAttempts: 2, ConflictFixAttempts: 1, FixCap: fixCap, SupervisorLive: tc.wantLive}
+			want := ipc.BabysitStatus{PR: 42, Repo: repo, Status: tc.wantState, CIFixAttempts: 2, ConflictFixAttempts: 1, FixCap: fixCap, SupervisorLive: tc.wantLive, Activity: tc.wantActivity}
 			if got != want {
 				t.Fatalf("StatusRepo = %+v, want %+v", got, want)
 			}
@@ -6977,5 +7013,44 @@ func TestLiveSupervisors_EmptyOverrideUsesTheStandardStateDirectory(t *testing.T
 	}
 	if got.Total != 1 || !got.Live("acme/widgets", "1") {
 		t.Errorf("LiveSupervisors(\"\") = {ByRepo:%v Total:%d}, want the one state under %s", got.ByRepo, got.Total, dir)
+	}
+}
+
+// #1469 AC82: `cenci babysit status <pr>` still prints one JSON object, now with an
+// `activity` key; every existing key keeps its name and value. The object is
+// decoded back from what Status writes to stdout, not read off the struct.
+func TestStatusPrintsOneJSONObjectWithTheActivityKeyAndEveryExistingKey(t *testing.T) {
+	t.Setenv("CENCI_SANDBOX", "")
+	originalGh := execGh
+	execGh = func(...string) (string, string, error) { return "o/r\n", "", nil }
+	t.Cleanup(func() { execGh = originalGh })
+	dir := t.TempDir()
+	if err := save(statePath(dir, "o/r", "42"), State{
+		SchemaVersion: stateSchemaVersion, PR: "42", Repo: "o/r", Status: "running", FixAttempts: 2, ConflictFixAttempts: 1,
+		RepairWorkerLive: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := captureStdout(t)
+	err := Status("42", dir)
+	out := restore()
+
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if strings.Count(out, "\n") != 1 || !strings.HasSuffix(out, "\n") {
+		t.Fatalf("stdout = %q, want exactly one JSON line", out)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("stdout %q is not one JSON object: %v", out, err)
+	}
+	want := map[string]any{
+		"pr": 42.0, "repo": "o/r", "status": "running", "ciFixAttempts": 2.0, "conflictFixAttempts": 1.0,
+		"fixCap": 3.0, "supervisorLive": false, "activity": "repairing",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("status object = %v, want %v", got, want)
 	}
 }

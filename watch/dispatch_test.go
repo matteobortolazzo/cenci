@@ -1564,3 +1564,202 @@ func TestDispatchStatusFilters_InvalidFiltersExit1WithoutDispatching(t *testing.
 		})
 	}
 }
+
+// -- dispatch status: the capacity lines (#1469) --------------------------------
+
+// serveDaemonSnapshot starts a daemon double on CENCI_SOCKET_DIR that serves snap
+// to every reader, so the status binary the test runs reads a real snapshot.
+func serveDaemonSnapshot(t *testing.T, snap watch.StateSnapshot) {
+	t.Helper()
+	socketDir, err := os.MkdirTemp("", "cenci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(socketDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	serveSnapshotAt(t, socketDir, snap)
+}
+
+// noContainerRuntimesPath is PATH with a docker and a podman that list nothing in
+// front, so the orphan count the status line reads never reaches a developer's
+// real container runtime.
+func noContainerRuntimesPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{"docker", "podman"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
+}
+
+// capacityStatusRun runs `cenci dispatch status` for owner/name with the machine
+// cap and the repo's own cap (nil for none) in the config, XDG_STATE_HOME at
+// stateHome, and either the daemon double serving snap or no daemon at all.
+func capacityStatusRun(t *testing.T, stateHome string, machineCap int, repoCap *int, snap *watch.StateSnapshot, extraArgs ...string) (string, error) {
+	t.Helper()
+	if snap != nil {
+		serveDaemonSnapshot(t, *snap)
+	} else {
+		useTempSocketDir(t)
+	}
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	repoEntry := fmt.Sprintf(`{"repo":"owner/name","dir":%q,"session":"a-work"`, dir)
+	if repoCap != nil {
+		repoEntry += fmt.Sprintf(`,"concurrencyCap":%d`, *repoCap)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	body := fmt.Sprintf(`{"dispatch":{"concurrencyCap":%d,"repos":[%s}]}}`, machineCap, repoEntry)
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := append([]string{"dispatch", "status", "--dir", dir, "--config", configPath}, extraArgs...)
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Env = append(os.Environ(), "XDG_STATE_HOME="+stateHome, "PATH="+noContainerRuntimesPath(t))
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func intPtr(n int) *int { return &n }
+
+// ledgerEntryJSON is one confirmed ledger entry as the ledger writes it.
+func ledgerEntryJSON(repo string, ticket int, window string) string {
+	return fmt.Sprintf(`{"holderId":"h%d","kind":"implement","repo":%q,"ticket":%d,"branch":"","launcherPid":1,"launcherStart":"","socket":"","window":%q,"dir":"","launchId":"","state":"confirmed","createdAt":"2026-07-10T12:00:00Z","updatedAt":"2026-07-10T12:00:00Z"}`, ticket, repo, ticket, window)
+}
+
+// seedLedgerFile writes content as the admission ledger under stateHome (0700
+// directories, as the store requires) and returns its path.
+func seedLedgerFile(t *testing.T, stateHome, content string) string {
+	t.Helper()
+	capDir := filepath.Join(stateHome, "cenci", "capacity")
+	if err := os.MkdirAll(capDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{stateHome, filepath.Join(stateHome, "cenci"), capDir} {
+		if err := os.Chmod(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(capDir, "ledger.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func runningWindow(name string) watch.WindowState {
+	return watch.WindowState{WindowName: name, Status: "running"}
+}
+
+// (edge) `dispatch status` with no ledger file prints the capacity line and leaves
+// no ledger behind. With no daemon the used count is unknown, and the line says
+// why; the repo's own slots come from the ledger alone and stay known.
+func TestDispatchStatus_CapacityLines_NoLedgerNoDaemon(t *testing.T) {
+	stateHome := t.TempDir()
+
+	out, err := capacityStatusRun(t, stateHome, 3, intPtr(1), nil)
+
+	if err != nil {
+		t.Fatalf("dispatch status exited non-zero: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"capacity: ?/3 slots (capacity observation unavailable: daemon snapshot)\n",
+		"capacity owner/name: 0/1 slots\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status output lacks %q:\n%s", want, out)
+		}
+	}
+	if _, statErr := os.Lstat(filepath.Join(stateHome, "cenci")); !os.IsNotExist(statErr) {
+		t.Errorf("a status read created the state tree (Lstat err = %v)", statErr)
+	}
+}
+
+// (P5) The used slots count each worker once under the shared rule: a ledger-held
+// worker that is also a running daemon session, plus a running manual session, is
+// 2/3; the capped repo's own line counts its ledger entries only.
+func TestDispatchStatus_CapacityLines_CountEachWorkerOnce(t *testing.T) {
+	stateHome := t.TempDir()
+	ledger := seedLedgerFile(t, stateHome, `{"schema":1,"entries":[`+ledgerEntryJSON("owner/name", 42, "42-implement")+`],"waits":[]}`)
+	before, _ := os.ReadFile(ledger)
+	snap := watch.StateSnapshot{
+		Windows: []watch.WindowState{runningWindow("42-implement"), runningWindow("manual-work"), {WindowName: "9-old", Status: "done"}},
+		Summary: watch.StatusSummary{Running: 2},
+	}
+
+	out, err := capacityStatusRun(t, stateHome, 3, intPtr(1), &snap)
+
+	if err != nil {
+		t.Fatalf("dispatch status exited non-zero: %v\n%s", err, out)
+	}
+	for _, want := range []string{"capacity: 2/3 slots\n", "capacity owner/name: 1/1 slots\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status output lacks %q:\n%s", want, out)
+		}
+	}
+	if after, _ := os.ReadFile(ledger); string(after) != string(before) {
+		t.Errorf("a status read rewrote the ledger:\n%s", after)
+	}
+}
+
+// A repo with no repo cap gets no per-repo line, and the lines sit after the
+// dailyQuota line and before the filters.
+func TestDispatchStatus_CapacityLines_OnlyCappedReposAndPlacement(t *testing.T) {
+	snap := watch.StateSnapshot{}
+
+	out, err := capacityStatusRun(t, t.TempDir(), 3, nil, &snap)
+
+	if err != nil {
+		t.Fatalf("dispatch status exited non-zero: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "capacity: 0/3 slots\n") {
+		t.Errorf("status output lacks the capacity line:\n%s", out)
+	}
+	if strings.Contains(out, "capacity owner/name") {
+		t.Errorf("an uncapped repo got its own capacity line:\n%s", out)
+	}
+	quota, capacityLine, filters := strings.Index(out, "dailyQuota: "), strings.Index(out, "capacity: "), strings.Index(out, "Filters: ")
+	if quota < 0 || capacityLine < quota || filters < capacityLine {
+		t.Errorf("status output = %q, want the capacity line after the dailyQuota line and before the filters", out)
+	}
+}
+
+// An unreadable ledger still exits 0 and names the reason in place of the count,
+// without rewriting the file.
+func TestDispatchStatus_CapacityLine_UnreadableLedger(t *testing.T) {
+	stateHome := t.TempDir()
+	const corrupt = "{definitely not a ledger"
+	path := seedLedgerFile(t, stateHome, corrupt)
+
+	out, err := capacityStatusRun(t, stateHome, 3, nil, &watch.StateSnapshot{})
+
+	if err != nil {
+		t.Fatalf("dispatch status exited non-zero for an unreadable ledger: %v\n%s", err, out)
+	}
+	if want := "capacity: ?/3 slots (capacity ledger unreadable: " + path + ": " + capacity.ErrCorrupt.Error() + ")\n"; !strings.Contains(out, want) {
+		t.Errorf("status output lacks %q:\n%s", want, out)
+	}
+	if got, _ := os.ReadFile(path); string(got) != corrupt {
+		t.Errorf("a status read rewrote the ledger: %q", got)
+	}
+}
+
+// `--json` is unchanged: it gains no capacity key.
+func TestDispatchStatus_CapacityJSONUnchanged(t *testing.T) {
+	out, err := capacityStatusRun(t, t.TempDir(), 3, intPtr(1), &watch.StateSnapshot{}, "--json")
+	if err != nil {
+		t.Fatalf("dispatch status --json: %v\n%s", err, out)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		t.Fatalf("status --json output %q is not one JSON object: %v", out, err)
+	}
+	for key := range raw {
+		if strings.Contains(strings.ToLower(key), "capacity") {
+			t.Errorf("status --json gained a %q key; the JSON shape is unchanged", key)
+		}
+	}
+}

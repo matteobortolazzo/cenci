@@ -640,7 +640,7 @@ func TestStop_SandboxDialFailureReportsNotStopped(t *testing.T) {
 
 // TestStatus_SandboxAckPrintsExactlyOneJSONLine covers P4's sandbox half.
 func TestStatus_SandboxAckPrintsExactlyOneJSONLine(t *testing.T) {
-	want := ipc.BabysitStatus{PR: 42, Repo: "o/r", Status: "needs-input", CIFixAttempts: 3, ConflictFixAttempts: 0, FixCap: 3, SupervisorLive: false}
+	want := ipc.BabysitStatus{PR: 42, Repo: "o/r", Status: "needs-input", CIFixAttempts: 3, ConflictFixAttempts: 0, FixCap: 3, SupervisorLive: false, Activity: "needs-input"}
 	path := startControlReceiver(t, nil, statusWith(ipc.BabysitStatusResponse{OK: true, Status: &want}))
 	sandboxControlFixture(t, path)
 
@@ -658,13 +658,16 @@ func TestStatus_SandboxAckPrintsExactlyOneJSONLine(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("stdout %q is not one JSON object: %v", out, err)
 	}
-	for _, key := range []string{"pr", "repo", "status", "ciFixAttempts", "conflictFixAttempts", "fixCap", "supervisorLive"} {
+	for _, key := range []string{"pr", "repo", "status", "ciFixAttempts", "conflictFixAttempts", "fixCap", "supervisorLive", "activity"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("status JSON %q lacks key %q", out, key)
 		}
 	}
-	if len(got) != 7 {
-		t.Errorf("status JSON has %d keys, want exactly 7: %q", len(got), out)
+	if len(got) != 8 {
+		t.Errorf("status JSON has %d keys, want exactly 8: %q", len(got), out)
+	}
+	if got["activity"] != "needs-input" {
+		t.Errorf("activity = %#v, want the daemon's needs-input", got["activity"])
 	}
 	if got["pr"] != float64(42) {
 		t.Errorf("pr = %#v, want the integer 42", got["pr"])
@@ -767,7 +770,7 @@ func TestStatus_HostReadsTheStateFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Status: %v", err)
 		}
-		const want = `{"pr":42,"repo":"o/r","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":false}` + "\n"
+		const want = `{"pr":42,"repo":"o/r","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":false,"activity":"needs-input"}` + "\n"
 		if out != want {
 			t.Errorf("stdout = %q, want %q", out, want)
 		}
@@ -790,7 +793,7 @@ func TestStatus_HostReadsTheStateFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Status: %v", err)
 		}
-		const want = `{"pr":42,"repo":"o/r","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":true}` + "\n"
+		const want = `{"pr":42,"repo":"o/r","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":true,"activity":"needs-input"}` + "\n"
 		if out != want {
 			t.Errorf("stdout = %q, want %q", out, want)
 		}
@@ -807,7 +810,7 @@ func TestStatus_HostReadsTheStateFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Status: %v", err)
 		}
-		const want = `{"pr":42,"repo":"o/r","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":false}` + "\n"
+		const want = `{"pr":42,"repo":"o/r","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":false,"activity":"needs-input"}` + "\n"
 		if out != want {
 			t.Errorf("stdout = %q, want %q", out, want)
 		}

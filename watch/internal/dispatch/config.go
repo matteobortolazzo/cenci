@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 )
 
@@ -53,6 +54,15 @@ type RepoConfig struct {
 
 	Filters json.RawMessage `json:"filters,omitempty"`
 	Filter  RepoFilter      `json:"-"`
+
+	// ConcurrencyCapRaw is the raw `concurrencyCap` value (#1469), kept verbatim
+	// for the same reasons as Filters: enroll and the config toggles round-trip
+	// it unchanged, and an explicit null reaches the validator instead of
+	// decoding to "unset". ConcurrencyCap is the validated form LoadConfig fills
+	// from it (nil: no repo ceiling, 0: admit nothing for this repo); it is never
+	// marshaled.
+	ConcurrencyCapRaw json.RawMessage `json:"concurrencyCap,omitempty"`
+	ConcurrencyCap    *int            `json:"-"`
 }
 
 // Config is the resolved dispatch policy: built-in defaults with a config.json
@@ -179,7 +189,7 @@ const (
 // "dispatch" block) is present.
 func DefaultConfig() Config {
 	return Config{
-		ConcurrencyCap:         3,
+		ConcurrencyCap:         capacity.DefaultMachineCap,
 		MemoryHeadroom:         defaultMemoryHeadroom,
 		OOMRetryBudget:         defaultOOMRetryBudget,
 		OOMBackoff:             defaultOOMBackoff,
@@ -294,6 +304,14 @@ func LoadConfig(path string) (Config, error) {
 				return cfg, fmt.Errorf("config %s: dispatch.repos[%d] (%s).filters%w", path, i, rc.Repo, err)
 			}
 			rc.Filter = filter
+			// The repo's own ceiling (#1469): the error comes from the one parser
+			// internal/capacity shares with the admission's limits read, and names
+			// the key.
+			repoCap, err := capacity.ParseRepoCap(rc.ConcurrencyCapRaw)
+			if err != nil {
+				return cfg, fmt.Errorf("config %s: dispatch.repos[%d] (%s): %w", path, i, rc.Repo, err)
+			}
+			rc.ConcurrencyCap = repoCap
 		}
 		cfg = mergeConfig(cfg, *f.Dispatch)
 		if headroom != nil {

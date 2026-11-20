@@ -315,6 +315,15 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		out = os.Stdout
 	}
 
+	// Capacity ledger housekeeping (#1469): let the ledger release the entries a
+	// complete tmux inventory proves gone, so whichever launcher admits next sees
+	// the freed slots. It is not a ticket mutation, so it runs ahead of the
+	// pre-collection hold below and a held state file does not stop it. A dry run
+	// writes nothing.
+	if !dryRun {
+		reconcileCapacity(out)
+	}
+
 	// Pre-collection hold probe (#883): reuses the same Load classification
 	// applyReconcile's own authoritative load will use later in this same
 	// pass, so a held pass (unreadable/corrupt/schema-mismatched/invalid

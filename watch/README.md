@@ -1099,8 +1099,13 @@ failing gate is the logged skip reason):
    `plan authorization unreadable` (see [Plan authorization](#plan-authorization)
    below). It runs regardless of `dispatch.pipelineStageGate` and, sitting ahead of
    the cap, a held ticket never takes a slot either;
-11. `running + orphaned container sessions + dispatched-this-pass` is below
-   `concurrencyCap`. Orphaned container sessions are the distinct (tmux socket,
+11. **concurrency cap** — first, when the ticket's repo sets a
+   [`repos[].concurrencyCap`](#configuration), this pass's dispatches into that repo are
+   below its effective cap (the lower of that value and `concurrencyCap`; `0` admits
+   nothing for the repo), else `repo concurrency cap reached`; then
+   `running + orphaned container sessions + dispatched-this-pass` is below
+   `concurrencyCap`. This gate is a pre-filter: gate 15 holds the authoritative,
+   cross-process count. Orphaned container sessions are the distinct (tmux socket,
    launch ID) pairs — (tmux socket, pane) for processes that carry no launch
    ID — that `cenci sandbox reap-orphans` would classify as dead reap targets,
    across every sandbox container on every available runtime;
@@ -1132,7 +1137,15 @@ failing gate is the logged skip reason):
 14. the resolved agent still has estimated token budget (see [Usage
     budgets](#usage-budgets) — when `agentLimits` is set this is computed from local
     token usage estimates, otherwise from the static `agentBudgetFloors`); when no
-    agent does, the skip reason is `estimated token budget exhausted`.
+    agent does, the skip reason is `estimated token budget exhausted`;
+15. **admission** — the launch reserves a slot in the shared admission ledger (see
+    [Shared worker limit](#shared-worker-limit-and-the-admission-ledger) below) just
+    before it spawns, else one of `worker already reserved`, `branch writer active`,
+    `repo concurrency cap reached`, `concurrency cap reached`, or a fail-closed
+    `capacity ledger unreadable: <path>: <reason>`, `capacity limits unreadable:
+    <reason>` or `capacity observation unavailable: <what>`. Only a ticket every gate
+    above let through is ever admitted, so its single `<owner/repo>#<n> skip: <reason>`
+    line is unchanged.
 
 Gate 9's `needInputThreshold` reads only `StatusSummary.NeedInput` — a live
 session waiting mid-turn for a permission prompt or similar. It deliberately
@@ -1140,6 +1153,73 @@ never reads `StatusSummary.Escalated` (ticket #826: a ticket the unattended
 planner escalated, `Input Needed`). The two are different concepts and must
 never be conflated: a single planner escalation must never freeze dispatch
 for the whole fleet the way `needInputThreshold` windows-awaiting-input can.
+
+#### Shared worker limit and the admission ledger
+
+`dispatch.concurrencyCap` (default `3`) is one limit on the workers of the whole host. It
+covers planning, implementation, resume and re-plan launches **and** every automated
+`cenci babysit` repair (`ci-repair`, `merge-repair`, `babysit-review`). It is enforced
+across processes: a one-shot `cenci dispatch --once`, the daemon's interval pass and every
+babysit supervisor reserve their slot in one admission ledger,
+`$XDG_STATE_HOME/cenci/capacity/ledger.json`, under the capacity store's whole-store lock, so
+two of them racing for the last slot start exactly one worker and the other logs
+`concurrency cap reached` (babysit records a capacity wait). `babysit-attention` prompts are
+not charged, and nested LLM subagents inside a worker are governed by their own bounded
+fan-out, not by this cap.
+
+- **Counting.** A slot is a ledger entry, plus a running daemon session no entry accounts
+  for (a manual worker), plus an orphaned container session. A worker the ledger holds that
+  also shows up as a running session counts once. Babysit supervisor processes and sessions
+  in a non-running status count zero. Per-repo usage is that repo's ledger entries.
+- **Caps.** Each admission re-reads `dispatch.concurrencyCap` and
+  `dispatch.repos[].concurrencyCap` from the config file, so an edit applies to the next
+  admission. A repo cap above the machine cap is clamped to it. Machine cap `0` pauses
+  dispatch and babysit repairs. Lowering a cap never kills a worker: nothing is admitted
+  until used slots drop below the new cap.
+- **Priority.** A babysit repair that finds the host full records a wait, which holds no
+  slot and expires after 3 of its poll intervals unless refreshed. Dispatch admits only when
+  free slots exceed the live waits; a repair needs one free slot.
+- **Branch writer.** Inside the same locked section, a dispatch launch is refused with
+  `branch writer active` when a babysit repair holds the ticket's recorded pipeline branch,
+  and a babysit repair is deferred with the same reason when a dispatch worker holds the
+  PR's branch. A pickup with no recorded branch skips this check; ticket exclusivity
+  (`worker already reserved`) still applies.
+- **Release.** A launch that failed before any window existed is released at once. A launch
+  that succeeded, or exited `3` (window spawned, setup failed), holds its slot until a
+  complete tmux inventory shows no such window (a dead launcher process is also required
+  while the entry is still only reserved). A failed or malformed inventory keeps every
+  reservation. Each dispatch reconcile pass and each babysit tick applies these rules.
+- **Fail closed.** An unreadable limits file, an unavailable daemon snapshot or orphan count,
+  or an unreadable ledger admits nothing and says why. A ledger that fails to parse, has an
+  unknown schema, is symlinked, is replaced by a writer on every read attempt (`a capacity
+  file kept changing while it was read`) or cannot be locked within 5s is never reset
+  automatically. When one entry or wait is malformed the error names its position (counted
+  from 1) and the failing check, never a value (`a capacity file is corrupt: entry 3:
+  launcher pid out of range`), so the entry to fix by hand is easy to find.
+  Manual recovery: confirm no workers are live (`cenci dispatch status`, `tmux list-windows`
+  on the dispatch session), then remove `ledger.json` from the capacity directory by hand.
+  Removing it while workers are live forgets their reservations, so the cap can be exceeded
+  until they exit (a worker the daemon sees as running still counts). A `Release` or `Confirm`
+  write that failed with a transient error (a busy lock, a brief I/O failure) is retried
+  once, then logged; if it still fails the entry stays `reserved` (conservative) and holds
+  its slot. A `Confirm` whose entry is gone says the entry is missing from the ledger
+  (removed or reset): the worker is live but counted only while the daemon sees it running.
+  A `reserved` entry is freed only when its launcher process is dead, and the launcher is
+  the process that made it (the dispatch pass, or the babysit supervisor), so an inventory
+  alone never frees it while that process runs: it clears on the first complete inventory
+  with no worker window after the process has exited (for the daemon, after a restart), or by
+  the same manual removal. A babysit supervisor also settles its own stranded entry on its
+  next tick (a running worker window confirms it, a complete inventory with none releases
+  it), so it does not keep a slot for a worker a complete inventory shows is gone.
+- **Status.** `cenci dispatch status` prints `capacity: <used>/<total> slots` and, for each
+  repo with a `concurrencyCap`, `capacity <owner/repo>: <used>/<cap> slots` (the effective
+  cap, the lower of the repo's and the machine's). It reads without a lock and creates no
+  ledger file; when the daemon snapshot, the orphan count, the limits or the ledger cannot
+  be read, the count is `?` and the concrete reason follows in parentheses
+  (`capacity: ?/3 slots (capacity observation unavailable: daemon snapshot)`). It always
+  exits 0 and `--json` is unchanged. `cenci babysit status <pr>` carries an `activity` key
+  (`monitoring`, `waiting-for-capacity`, `repairing` or `needs-input`; see
+  [Automerge](#automerge-cenci-babysit)).
 
 #### Plan authorization
 
@@ -1726,7 +1806,8 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 |-----|---------|---------|
 | `repos` | — | Repos to scan; each entry requires `repo`, `dir` (holds that repo's `.plans/` and git tree), and `session` (the tmux session that repo's dispatched windows target — never an ambient/current session). Normally managed via `cenci dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. A repo whose `session` is empty, names a tmux session that doesn't exist on the probed server, or whose session probe fails has its tickets skipped for that pass with `session unconfigured`, `session absent` or `session probe failed` (each logged once: `dispatch: no target tmux session for <repo>; set repos[].session in <config path>`, the "not found on tmux server <socket>" line whose remedy is [`cenci up`](#starting-the-cenci-session-cenci-up) (which creates the `cenci` session) or `cenci dispatch enroll --session <name>` for another existing session, or the "probing configured session ... failed" line, which names the probed server and `cenci up`). The probed server is the one the spawn would launch on: the first field of `$TMUX` when dispatch runs inside tmux, else the cenci server. The check runs before the concurrency cap, so every other enrolled repo still dispatches normally in the same pass and never loses a slot to it (see [Pickup rules and gates](#pickup-rules-and-gates)). |
 | `repos[].filters` | none | Optional machine-local pickup filter on a `repos` entry: `milestones` (repo-local numbers), `labelsAll`, `labelsAny`, `labelsNone`. Dimensions AND together; omitted, `{}` and empty lists mean no restriction; an unknown key, `null`, wrong type or invalid entry is a config error that stops every repo for that pass. Read only from this user config, never a committed `.cenci/config.json`. See [Machine-local filters](#machine-local-filters) |
-| `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows, orphaned container sessions still alive after their pane closed, and this pass's dispatches) |
+| `repos[].concurrencyCap` | none | Optional lower worker limit for one `repos` entry: an integer `>= 0`, counting that repo's held workers (dispatch launches and babysit repairs). The effective cap is the lower of this and `concurrencyCap`, so a value above the machine cap is clamped to it; `0` admits nothing for that repo (`repo concurrency cap reached`) while other repos still admit. `null`, a negative number, a non-integer or any other type is a config error naming `dispatch.repos[].concurrencyCap`. `cenci dispatch status` prints a `capacity <owner/repo>: <used>/<cap> slots` line for each repo with a cap. See [Shared worker limit](#shared-worker-limit-and-the-admission-ledger) |
+| `concurrencyCap` | `3` | Max concurrent workers on the host. Counts the shared admission ledger's held workers (dispatch launches **and** babysit `ci-repair`, `merge-repair` and `babysit-review` repair workers, across every process), running sessions the ledger does not account for (manual workers included), and orphaned container sessions still alive after their pane closed, plus this pass's dispatches. `0` pauses dispatch and babysit repairs; lowering it never kills a worker. `cenci dispatch status` prints `capacity: <used>/<total> slots`. See [Shared worker limit](#shared-worker-limit-and-the-admission-ledger) |
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |
 | `memoryHeadroom` | `25` | Minimum percent of a repo's container memory limit that must be free before dispatch picks up into it (integer 0–100; `0` disables the gate; see [Pickup rules and gates](#pickup-rules-and-gates)); a non-integer, `null`, negative or >100 value is a config error |
 | `dailyQuota` | `off` | Max dispatch launches per real local calendar day, persisted under `$XDG_STATE_HOME/cenci/capacity/` so the count carries across restarts and processes and starts at 0 on the next local date. Off by default: absent and the string `"off"` both mean no limit, and while off the store is never read or written. An integer `N` counts `N` launches per day and skips further pickups with `daily quota reached`; `0` pauses every dispatch; `null`, a negative number, a non-integer or any other string (`"OFF"` and `"5"` included) is a config error naming `dispatch.dailyQuota`. With a quota set, an unreadable, corrupt, unknown-schema or symlinked quota state blocks every dispatch (`daily quota state unreadable: <reason>`) and is never auto-reset: remove `daily-quota.json` under the capacity directory by hand to recover. A launch whose recording fails is kept as a pending count in the running process and recorded in one write before the next real pass reads the count; while that write fails the pass skips every candidate with `daily quota state unreadable: <reason>`, and a dry run with launches pending for today skips with `daily quota state unreadable: unrecorded launch pending`. Pending launches from an earlier day are discarded, and a process exit (daemon restart, `cenci dispatch --once`) loses the pending count. `cenci dispatch status` prints `dailyQuota: off` or `dailyQuota: N per local day (used X)` |
@@ -2391,7 +2472,13 @@ close it once its edits are preserved). An unreadable pane inventory,
 or a recorded session that no longer exists, fails the tick without launching. An ended
 worker (dead pane or no window) is retried at the same head until the budget is used.
 A `cenci run` exit status 3 (window spawned, post-spawn setup failed) counts as a
-dispatched attempt. Details: `watch/docs/babysit.md`.
+dispatched attempt. Every one of these launches (`ci-repair`, `merge-repair` and
+`babysit-review`, not `babysit-attention`) first reserves a slot against `dispatch.concurrencyCap`
+in the shared admission ledger (see [Shared worker limit](#shared-worker-limit-and-the-admission-ledger)):
+with the host full, or the ledger, the limits or the daemon snapshot unreadable, the
+supervisor prints the reason (`concurrency cap reached`, `capacity ledger unreadable: <path>:
+<reason>`, …), opens no window, spends no attempt and retries on the next poll. Details:
+`watch/docs/babysit.md`.
 
 Running `cenci babysit` from inside a `cenci sandbox`-launched
 container (`CENCI_SANDBOX=1`) never supervises locally — the container has no host
@@ -2453,8 +2540,16 @@ unreadable`, below), while a forwarded stop refuses it and keeps the file.
 `cenci babysit status <pr>` prints exactly one JSON object and exits 0:
 
 ```json
-{"pr":42,"repo":"owner/repo","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":true}
+{"pr":42,"repo":"owner/repo","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":true,"activity":"needs-input"}
 ```
+
+`activity` is what the supervisor is doing now, derived from the persisted state with this
+precedence: `needs-input` (the status is `needs-input`), then `repairing` (the last tick saw
+or launched a live repair worker), then `waiting-for-capacity` (a repair is refused for
+capacity and the wait was refreshed within 3 poll intervals), then `monitoring`. A tick that
+needs no decision reads no pane inventory; it keeps `repairing` for as long as the shared
+ledger still holds a repair entry of this PR, and drops to `monitoring` once the tick's
+release frees it (the worker is gone). Every other key is unchanged.
 
 `status` is the persisted supervisor status; `ciFixAttempts` and
 `conflictFixAttempts` count CI-repair and merge-repair launches against `fixCap`.

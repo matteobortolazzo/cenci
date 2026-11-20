@@ -206,6 +206,7 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 			AuthorIsBot:         is.Author.IsBot,
 			Stage:               state.Stage,
 			StageProbe:          state.Probe,
+			Branch:              state.Branch,
 			MainSync:            sync,
 			DependsOn:           dependsOn,
 			DependencyStates:    depStates,
@@ -266,14 +267,17 @@ type stageRead struct {
 	Stage  string
 	Probe  StageProbe
 	Launch RecordedLaunch
+	// Branch is the pipeline branch recorded in the state file (#1469).
+	Branch string
 	// Authorization and AuthorizationProbe are the plan-authorization record
 	// (#1464), classified by pipeline.ParseAuthorization.
 	Authorization      pipeline.Authorization
 	AuthorizationProbe AuthorizationProbe
 }
 
-// probeStageState is probeStage plus the launch (#1292) and the
-// plan-authorization record (#1464) recorded in the same state-file read. The
+// probeStageState is probeStage plus the launch (#1292), the plan-authorization
+// record (#1464) and the pipeline branch (#1469, the admission's branch-writer
+// key) recorded in the same state-file read. The
 // launch is the raw session triple (`launchId`/`container`/`runtime`), verbatim
 // and unvalidated -- resolveLaunchVerdicts re-validates it before use. A read
 // that fails, or a file whose stage is not a known one (StageProbeError),
@@ -296,8 +300,9 @@ func probeStageState(dir string, number int) stageRead {
 		return stageRead{Stage: string(s.Stage), Probe: StageProbeError, AuthorizationProbe: AuthorizationProbeUnreadable}
 	}
 	r := stageRead{
-		Stage: string(s.Stage),
-		Probe: StageProbePresent,
+		Stage:  string(s.Stage),
+		Probe:  StageProbePresent,
+		Branch: s.Branch,
 		Launch: RecordedLaunch{
 			ID:        s.Session[pipeline.SessionKeyLaunchID],
 			Container: s.Session[pipeline.SessionKeyContainer],

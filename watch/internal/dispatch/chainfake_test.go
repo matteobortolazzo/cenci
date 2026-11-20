@@ -667,15 +667,49 @@ const chainFakeTmuxSession = "chain-test-session"
 // babysit's per-tick pane inventory (#1455, #1457) fails closed on an empty or
 // malformed inventory, and no `<PR>-ci-repair` or `<PR>-merge-repair` worker is
 // live here.
-func installFakeTmux(t *testing.T) {
+//
+// The shim also answers the capacity inventory (#1469): the two `-a` listings
+// tmux.ListCleanupInventory joins (tmux-owned pane rows, then window name and repo
+// dir rows) list the same windows, so the ledger's release rules see a complete
+// inventory. The live windows are the lines of the `windows` file beside the shim
+// (default: the one unrelated "1-implement" window); the shim reads it on every
+// call, so a test, or a helper process it started, changes what is live with
+// setFakeTmuxWindows. A file, not the environment: tmux.RunSocket runs a socketed
+// call with a minimal environment. A leading `-S <socket>` pair is dropped, so a
+// socketed call answers like an ambient one. installFakeTmux returns the file.
+func installFakeTmux(t *testing.T) (windowsFile string) {
 	t.Helper()
 	dir := t.TempDir()
-	script := "#!/bin/sh\ncase \"$1\" in\n  has-session) exit 0 ;;\n  display-message) echo " + chainFakeTmuxSession + " ;;\n  list-panes) printf '1-implement\\t0\\t\\n' ;;\n  *) exit 0 ;;\nesac\n"
+	windowsFile = filepath.Join(dir, "windows")
+	if err := os.WriteFile(windowsFile, []byte("1-implement\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nwindows=\"$(dirname \"$0\")/windows\"\n" +
+		"if [ \"$1\" = \"-S\" ]; then shift 2; fi\n" +
+		"case \"$1\" in\n  has-session) exit 0 ;;\n  display-message) echo " + chainFakeTmuxSession + " ;;\n" +
+		"  list-panes)\n    i=0\n    while read -r w; do\n      i=$((i+1))\n" +
+		"      case \"$*\" in\n        *window_id*) printf '@%d\\t%%%d\\t0\\n' \"$i\" \"$i\" ;;\n        *) printf '%s\\t0\\t\\n' \"$w\" ;;\n      esac\n    done < \"$windows\" ;;\n" +
+		"  list-windows)\n    i=0\n    while read -r w; do\n      i=$((i+1))\n      printf '@%d\\t%s\\t\\n' \"$i\" \"$w\"\n    done < \"$windows\" ;;\n" +
+		"  *) exit 0 ;;\nesac\n"
 	path := filepath.Join(dir, "tmux")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return windowsFile
+}
+
+// setFakeTmuxWindows makes the named windows the live ones of the fake tmux whose
+// windows file installFakeTmux returned (none: an empty, complete inventory).
+func setFakeTmuxWindows(t *testing.T, windowsFile string, names ...string) {
+	t.Helper()
+	content := ""
+	for _, name := range names {
+		content += name + "\n"
+	}
+	if err := os.WriteFile(windowsFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // shellQuoteChain wraps s in single quotes for safe embedding in the shim

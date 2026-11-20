@@ -1348,6 +1348,52 @@ func TestReadPlans_Sha256MatchesPipelineRecord(t *testing.T) {
 	}
 }
 
+// TestCollectRepoTickets_FillsBranchFromStateFile (#1469): the collected Ticket
+// carries the pipeline branch recorded in its state file, from the same read as
+// the stage; a ticket with no state, or a state with no branch, carries none.
+func TestCollectRepoTickets_FillsBranchFromStateFile(t *testing.T) {
+	installFakeGHOnPath(t, twoIssuesFakeGHScript)
+	dir := t.TempDir()
+	writeStateFile(t, dir, 10, `{"schemaVersion":2,"id":"10","stage":"prepared","branch":"feature/ten"}`)
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r", Dir: dir}, MainSyncSkipped, true, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets: %v", err)
+	}
+	byNumber := map[int]Ticket{}
+	for _, tk := range tickets {
+		byNumber[tk.Number] = tk
+	}
+	if got := byNumber[10].Branch; got != "feature/ten" {
+		t.Errorf("#10 Branch = %q, want %q", got, "feature/ten")
+	}
+	if got := byNumber[11].Branch; got != "" {
+		t.Errorf("#11 Branch = %q, want none (no state file)", got)
+	}
+}
+
+func TestProbeStageState_ReadsBranchOnlyFromAReadableState(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"recorded branch", `{"schemaVersion":2,"id":"42","stage":"prepared","branch":"fix/x"}`, "fix/x"},
+		{"no branch recorded", `{"schemaVersion":2,"id":"42","stage":"prepared"}`, ""},
+		{"unknown stage carries none", `{"schemaVersion":2,"id":"42","stage":"bogus","branch":"fix/x"}`, ""},
+		{"undecodable state carries none", `{not json`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStateFile(t, dir, 42, tt.content)
+			if got := probeStageState(dir, 42).Branch; got != tt.want {
+				t.Errorf("Branch = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestCollectRepoTickets_FillsAuthorizationFromStateFile pins the production
 // wiring: the collected Ticket carries the record and its probe.
 func TestCollectRepoTickets_FillsAuthorizationFromStateFile(t *testing.T) {

@@ -307,7 +307,11 @@ In `~/.config/cenci/config.json`:
 }
 ```
 
-`concurrencyCap` is the default limiter. `dailyQuota` is off unless you set it, and
+Launch capacity is controlled by `dispatch.concurrencyCap`, not by token usage: one
+machine-wide limit on running workers that covers planning, implementation and every
+automated babysit repair (CI repair, merge repair, review), shared by every dispatch pass
+and babysit supervisor on the host. An optional `dispatch.repos[].concurrencyCap` sets a
+lower limit for one repository. `dailyQuota` is off unless you set it, and
 an unreadable quota file then blocks dispatch until it is removed by hand (see the
 `dailyQuota` row in [the watch README](../watch/README.md#configuration)). Token limits
 (`agentLimits`, `agentBudgetFloors`) are local estimates of your own usage, never the

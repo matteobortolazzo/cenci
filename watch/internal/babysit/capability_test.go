@@ -1,10 +1,14 @@
 package babysit
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -165,5 +169,144 @@ func TestArmWorkflowsCoverEveryLaunchCallSite(t *testing.T) {
 		if !seen[wf] {
 			t.Errorf("ArmWorkflows requires %q but the babysit source never launches it", wf)
 		}
+	}
+}
+
+// branchWriterWorkflows are the launches that write to the supervised PR's
+// branch. Each one needs a capacity reservation (#1469): launch() refuses one
+// without it, and every call site must obtain it from admitRepair.
+var branchWriterWorkflows = []string{"ci-repair", "merge-repair", "babysit-review"}
+
+// branchWriterLaunchViolations parses one Go source file and reports every
+// launch(...) call that could bypass admission: a branch-writer workflow
+// launched with a nil-literal permit, or from a function that never calls
+// admitRepair, and any call whose workflow is not a string literal or that does
+// not carry the permit argument. It also returns the branch-writer call sites it
+// saw, by workflow, so the caller can prove the check is not vacuous.
+func branchWriterLaunchViolations(t *testing.T, filename string, src any) (violations []string, sites []string) {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filename, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", filename, err)
+	}
+	callsAdmit := func(body ast.Node) bool {
+		found := false
+		ast.Inspect(body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "admitRepair" {
+					found = true
+				}
+			}
+			return !found
+		})
+		return found
+	}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		admits := callsAdmit(fn.Body)
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "launch" {
+				return true
+			}
+			where := fset.Position(call.Pos()).String()
+			if len(call.Args) != 4 {
+				violations = append(violations, where+": launch call without the permit argument")
+				return true
+			}
+			lit, ok := call.Args[1].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				violations = append(violations, where+": launch call with a non-literal workflow")
+				return true
+			}
+			workflow, _ := strconv.Unquote(lit.Value)
+			if !slices.Contains(branchWriterWorkflows, workflow) {
+				return true
+			}
+			sites = append(sites, workflow)
+			if id, ok := call.Args[3].(*ast.Ident); ok && id.Name == "nil" {
+				violations = append(violations, where+": "+workflow+" is launched with a nil permit")
+			}
+			if !admits {
+				violations = append(violations, where+": "+workflow+" is launched from "+fn.Name.Name+", which never calls admitRepair")
+			}
+			return true
+		})
+	}
+	return violations, sites
+}
+
+// #1469: a branch-writer launch (ci-repair, merge-repair, babysit-review) must
+// never bypass the admission ledger. The check walks the non-test source with
+// go/ast: every such launch( call passes a permit that is not the nil literal and
+// sits in a function that calls admitRepair. A new call site, or a changed one,
+// that skips either fails here instead of launching an uncounted worker.
+func TestBranchWriterLaunchesAreAdmitted(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]int{}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		violations, sites := branchWriterLaunchViolations(t, f, nil)
+		for _, v := range violations {
+			t.Error(v)
+		}
+		for _, wf := range sites {
+			seen[wf]++
+		}
+	}
+	for _, wf := range branchWriterWorkflows {
+		if seen[wf] == 0 {
+			t.Errorf("found no launch(<state>, %q, ...) call site; the admission guard is stale", wf)
+		}
+	}
+}
+
+// The call-site check must catch the bypasses it exists for, so it is run over
+// synthetic sources: a nil permit, a call outside any admitRepair function, a
+// closure inside one, an attention launch (uncharged, nil allowed) and a missing
+// permit argument.
+func TestBranchWriterLaunchCheckerCatchesBypasses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  string
+		want int // violations
+	}{
+		{"admitted with a permit", `package p
+func f(s *State) { permit, _ := admitRepair(s); _ = launch(s, "ci-repair", "x", permit) }`, 0},
+		{"nil permit", `package p
+func f(s *State) { admitRepair(s); _ = launch(s, "merge-repair", "x", nil) }`, 1},
+		{"no admitRepair in the function", `package p
+func f(s *State, permit *P) { _ = launch(s, "babysit-review", "x", permit) }`, 1},
+		{"nil permit and no admitRepair", `package p
+func f(s *State) { _ = launch(s, "ci-repair", "x", nil) }`, 2},
+		{"closure inside an admitting function", `package p
+func f(s *State) { permit, _ := admitRepair(s); func() { _ = launch(s, "ci-repair", "x", permit) }() }`, 0},
+		{"closure inside a non-admitting function", `package p
+func f(s *State, permit *P) { func() { _ = launch(s, "ci-repair", "x", permit) }() }`, 1},
+		{"attention is uncharged", `package p
+func f(s *State) { _ = launch(s, "babysit-attention", "x", nil) }`, 0},
+		{"missing permit argument", `package p
+func f(s *State) { _ = launch(s, "ci-repair", "x") }`, 1},
+		{"non-literal workflow", `package p
+func f(s *State, wf string) { _ = launch(s, wf, "x", nil) }`, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			violations, _ := branchWriterLaunchViolations(t, "synthetic.go", tc.src)
+			if len(violations) != tc.want {
+				t.Errorf("violations = %q, want %d", violations, tc.want)
+			}
+		})
 	}
 }

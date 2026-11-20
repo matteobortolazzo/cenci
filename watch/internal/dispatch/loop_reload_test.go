@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
@@ -899,5 +900,71 @@ esac
 	}
 	if len(ctl.calls) != 0 {
 		t.Errorf("tightening must not create, re-style or touch any window: %q", ctl.calls)
+	}
+}
+
+// Lowering concurrencyCap from 3 to 1 by a config reload while 3 workers are live
+// records no window call (dispatch has no kill or close: windowCallRecorder shows
+// it touched none) and admits nothing until the used slots drop below 1; the
+// reload is the one a RunLoop tick does (reloadConfig), and the next admission
+// re-reads the limits from the same file.
+func TestReloadLoweringConcurrencyCapKillsNothingAndAdmitsNothingUntilSlotsFree(t *testing.T) {
+	l, _ := useLedger(t)
+	for n := 91; n <= 93; n++ {
+		seedHeld(t, l, capacity.KindImplement, "o/r", n, "")
+	}
+	useLiveWindows(t, "91-implement", "92-implement", "93-implement")
+	cfg := capacityConfig(t, 3, capRepo{name: "o/r"})
+	path := cfg.Path
+	spawned := recordSpawns(t)
+	ctl := &windowCallRecorder{}
+	running := func(n int) watch.WindowState {
+		return watch.WindowState{WindowName: fmt.Sprintf("%d-implement", n), Status: "running"}
+	}
+	deps := capacityDeps(ticketRef{repo: "o/r", number: 1})
+	deps.Snapshot = &watch.StateSnapshot{Windows: []watch.WindowState{running(91), running(92), running(93)}, Summary: watch.StatusSummary{Running: 3}}
+
+	// Three live workers fill a cap of 3: nothing is admitted.
+	var buf bytes.Buffer
+	if _, err := applyDispatch(cfg, deps, ctl, &fakeMutator{}, false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	assertSkipped(t, buf.String(), "o/r", 1, "concurrency cap reached")
+
+	// The cap is lowered between ticks and reloaded.
+	if err := os.WriteFile(path, []byte(`{"dispatch":{"concurrencyCap":1,"repos":[{"repo":"o/r","dir":"","session":"test-session"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, ok := reloadConfig(path, &buf)
+	if !ok {
+		t.Fatalf("reloadConfig failed:\n%s", buf.String())
+	}
+	buf.Reset()
+	// The daemon has not tracked the workers yet (an idle snapshot): the ledger
+	// alone says the three slots are used.
+	if _, err := applyDispatch(reloaded, capacityDeps(ticketRef{repo: "o/r", number: 1}), ctl, &fakeMutator{}, false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	assertSkipped(t, buf.String(), "o/r", 1, "concurrency cap reached")
+	if len(*spawned) != 0 {
+		t.Errorf("spawned %v with 3 workers live and a cap of 1, want nothing", *spawned)
+	}
+	if len(ctl.calls) != 0 {
+		t.Errorf("lowering the cap touched windows: %q", ctl.calls)
+	}
+	if got := heldEntries(t, l); len(got) != 3 {
+		t.Errorf("the ledger holds %d entries after the cap was lowered, want all 3 workers kept", len(got))
+	}
+
+	// The workers exit: the first complete inventory without them frees the slots,
+	// and the next admission goes through under the lowered cap.
+	useLiveWindows(t)
+	idle := capacityDeps(ticketRef{repo: "o/r", number: 1})
+	buf.Reset()
+	if _, err := applyDispatch(reloaded, idle, ctl, &fakeMutator{}, false, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if len(*spawned) != 1 || (*spawned)[0] != "1" {
+		t.Errorf("spawned %v after the workers exited, want ticket 1\n%s", *spawned, buf.String())
 	}
 }

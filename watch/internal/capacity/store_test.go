@@ -335,3 +335,111 @@ func TestStoreWithLockRefusesSymlinkedLockFile(t *testing.T) {
 		t.Fatalf("WithLock err = %v, want ErrLockUnavailable", err)
 	}
 }
+
+// A lock-free read races a writer's rename: the file Lstat saw can be replaced
+// before it is opened, which reads as a different file. That is a retry, not a
+// refusal.
+func TestStoreReadFileRetriesWhenAWriterRenamesBetweenLstatAndOpen(t *testing.T) {
+	dir := trustedDir(t)
+	s := NewStore(dir)
+	if err := s.WriteFile("state.json", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	afterReadLstat = func() {
+		calls++
+		if calls == 1 {
+			if err := s.WriteFile("state.json", []byte("v2")); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { afterReadLstat = nil })
+
+	data, exists, err := s.ReadFile("state.json")
+
+	if err != nil || !exists || string(data) != "v2" {
+		t.Fatalf("ReadFile = %q, exists %v, err %v; want the replaced file read on the retry", data, exists, err)
+	}
+}
+
+// The retry is bounded: a file that keeps being replaced still ends in an
+// answer, and the one real non-regular case, a symlink, is never retried into
+// success.
+func TestStoreReadFileGivesUpOnAFileThatKeepsChanging(t *testing.T) {
+	dir := trustedDir(t)
+	s := NewStore(dir)
+	if err := s.WriteFile("state.json", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	afterReadLstat = func() {
+		calls++
+		if err := s.WriteFile("state.json", []byte("again")); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterReadLstat = nil })
+
+	_, exists, err := s.ReadFile("state.json")
+
+	if !errors.Is(err, ErrRaced) || errors.Is(err, ErrNotRegular) || !exists {
+		t.Fatalf("ReadFile = exists %v, err %v; want ErrRaced (not ErrNotRegular) once the retries are spent", exists, err)
+	}
+	if calls != readAttempts {
+		t.Errorf("attempts = %d, want exactly %d", calls, readAttempts)
+	}
+	assertPathFree(t, err, dir)
+}
+
+// A symlink is a hostile path, not a busy writer: it is refused on the first
+// attempt as ErrNotRegular, never retried and never reported as a race.
+func TestStoreReadFileRefusesASymlinkOnTheFirstAttempt(t *testing.T) {
+	dir := trustedDir(t)
+	s := NewStore(dir)
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "state.json")); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	afterReadLstat = func() { calls++ }
+	t.Cleanup(func() { afterReadLstat = nil })
+
+	data, exists, err := s.ReadFile("state.json")
+
+	if !errors.Is(err, ErrNotRegular) || errors.Is(err, ErrRaced) || !exists || string(data) == "secret" {
+		t.Fatalf("ReadFile = %q, exists %v, err %v; want ErrNotRegular", data, exists, err)
+	}
+	if calls != 1 {
+		t.Errorf("attempts = %d, want 1: a symlink is not retried", calls)
+	}
+}
+
+func TestStoreReadFileStillRefusesASymlinkSwappedInBetweenLstatAndOpen(t *testing.T) {
+	dir := trustedDir(t)
+	s := NewStore(dir)
+	if err := s.WriteFile("state.json", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	afterReadLstat = func() {
+		path := filepath.Join(dir, "state.json")
+		_ = os.Remove(path)
+		if err := os.Symlink(outside, path); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterReadLstat = nil })
+
+	data, _, err := s.ReadFile("state.json")
+
+	if !errors.Is(err, ErrNotRegular) || string(data) == "secret" {
+		t.Fatalf("ReadFile = %q, %v; want ErrNotRegular and never the symlink target", data, err)
+	}
+}

@@ -101,11 +101,13 @@ func usedOn(st quotaState, today string) int {
 }
 
 // Used returns how many launches were recorded on now's local day. It reads
-// under the store lock, never creates anything, and reads 0 from an absent
-// store or file.
+// under the store lock and reads 0 from an absent store or file. It never creates
+// the store directory or the data file, but when the data file exists and `.lock`
+// has gone missing it recreates `.lock` (an empty file): reading an existing file
+// without the lock would race a writer's read-modify-write.
 func (q *DailyQuota) Used(now time.Time) (int, error) {
 	var used int
-	err := q.store.withReadLock(func() error {
+	err := q.store.withReadLock(quotaFileName, func() error {
 		st, err := q.load()
 		used = usedOn(st, day(now))
 		return err
