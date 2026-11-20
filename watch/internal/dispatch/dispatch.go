@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
@@ -56,6 +57,103 @@ func readDailyQuota(q *capacity.DailyQuota, now time.Time, dryRun bool, out io.W
 		return DailyQuotaState{Unreadable: err.Error()}
 	}
 	return DailyQuotaState{Read: true, Used: used}
+}
+
+// readDailyQuotaFn is the seam over readDailyQuota, so a test can fail the read
+// that follows a successful pending-launch flush.
+var readDailyQuotaFn = readDailyQuota
+
+// pendingLaunches counts launches (#1572) whose capacity.DailyQuota.Record
+// failed after a successful spawn, tagged with their local day. It lives in
+// memory only: the failure it covers is an unwritable store, so it cannot be
+// persisted, and a process exit drops it. One process resolves one capacity
+// directory, so one package-level value serves every pass. The mutex is held
+// across the flush, which may wait for the store's lock timeout; passes run one
+// at a time in both loops.
+var pendingLaunches struct {
+	mu  sync.Mutex
+	day string
+	n   int
+}
+
+// localDay is now's local calendar date. It applies the same rule as the
+// unexported capacity.day (now.In(time.Local), "2006-01-02"), so a pending
+// launch's day compares equal to the day the store counts it on; keep the two
+// in step.
+func localDay(now time.Time) string { return now.In(time.Local).Format("2006-01-02") }
+
+// addPendingLaunch counts one unrecorded launch on now's local day. A pending
+// count from another day is dropped first: the gate only counts today.
+func addPendingLaunch(now time.Time) {
+	pendingLaunches.mu.Lock()
+	defer pendingLaunches.mu.Unlock()
+	today := localDay(now)
+	if pendingLaunches.day != today {
+		pendingLaunches.day, pendingLaunches.n = today, 0
+	}
+	pendingLaunches.n++
+}
+
+// pendingLaunchState returns the pending launch day and count (tests).
+func pendingLaunchState() (day string, n int) {
+	pendingLaunches.mu.Lock()
+	defer pendingLaunches.mu.Unlock()
+	return pendingLaunches.day, pendingLaunches.n
+}
+
+// resetPendingLaunches clears the pending launches (tests).
+func resetPendingLaunches() {
+	pendingLaunches.mu.Lock()
+	defer pendingLaunches.mu.Unlock()
+	pendingLaunches.day, pendingLaunches.n = "", 0
+}
+
+// settlePendingLaunches records the launches whose Record failed earlier
+// (#1572), before the pass reads the count. It returns "" when nothing blocks
+// the pass, or the path-free reason the pass must fail closed on:
+//   - nothing pending, or pending launches from a day other than today's: ""
+//     (a real pass discards the latter, because the gate only counts today; a
+//     dry run changes nothing);
+//   - a dry run with launches pending for today: reasonDailyQuotaRecordPending,
+//     because a dry run never writes;
+//   - otherwise all of them are recorded in one RecordN write: "" on success
+//     (the count clears), the write error's text on failure (the count stays).
+func settlePendingLaunches(q *capacity.DailyQuota, now time.Time, dryRun bool, out io.Writer) string {
+	pendingLaunches.mu.Lock()
+	defer pendingLaunches.mu.Unlock()
+	if pendingLaunches.n == 0 {
+		return ""
+	}
+	if pendingLaunches.day != localDay(now) {
+		if !dryRun {
+			pendingLaunches.day, pendingLaunches.n = "", 0
+		}
+		return ""
+	}
+	if dryRun {
+		logf(out, "dispatch: daily quota: %d unrecorded launch(es) pending (dry run, not recorded)\n", pendingLaunches.n)
+		return reasonDailyQuotaRecordPending
+	}
+	if err := q.RecordN(now, pendingLaunches.n); err != nil {
+		logf(out, "dispatch: daily quota: %d unrecorded launch(es) pending: %s\n", pendingLaunches.n, err)
+		return err.Error()
+	}
+	pendingLaunches.day, pendingLaunches.n = "", 0
+	return ""
+}
+
+// resolveDailyQuota resolves Inputs.DailyQuota for one pass: it settles pending
+// launches first and fails the pass closed when that does not clear them, and
+// otherwise reads the count. With the quota off (nil counter) it returns the
+// zero state and never touches the pending launches.
+func resolveDailyQuota(q *capacity.DailyQuota, now time.Time, dryRun bool, out io.Writer) DailyQuotaState {
+	if q == nil {
+		return DailyQuotaState{}
+	}
+	if hold := settlePendingLaunches(q, now, dryRun, out); hold != "" {
+		return DailyQuotaState{Unreadable: hold}
+	}
+	return readDailyQuotaFn(q, now, dryRun, out)
 }
 
 // replanContextToken (#828) is the escape-hatch token appended to the run
@@ -442,12 +540,18 @@ func readPlansForRepos(repos []RepoConfig, syncs map[string]mainSyncResult, out 
 // Decide (Used on a real pass, Peek on a dry run) and one launch is recorded
 // after each successful spawn, whether or not the Working claim then succeeds.
 // A failed spawn and a dry run record nothing, and a failed record is logged,
-// not returned (RunLoop treats a returned error as fatal). A corrupt,
-// unknown-schema or symlinked file fails closed on the next pass's read, but a
-// write failure that leaves a valid file (disk full, read-only capacity
-// directory, lock timeout) undercounts until the state is writable again: a
-// known limitation, tracked as a follow-up. With the quota off the store is
-// never opened.
+// not returned (RunLoop treats a returned error as fatal).
+//
+// A failed record (#1572) is kept in an in-process pending count tagged with
+// its local day. Every real pass with the quota set records today's pending
+// launches in one write before the read, and fails closed if that write fails:
+// each candidate is skipped with the unreadable reason and nothing is spawned,
+// until the store is writable again. A dry run never writes, so pending
+// launches for today make it skip with a fixed reason. Pending launches from an
+// earlier local day are discarded, since the gate only counts today. The count
+// lives in memory only: a process exit (a daemon restart, a one-shot pass)
+// drops it, which is the one residual undercount. With the quota off the store
+// is never opened and the pending count is left alone.
 func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut TicketMutator, dryRun bool, out io.Writer) ([]Decision, error) {
 	if out == nil {
 		out = os.Stdout
@@ -465,7 +569,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	if cfg.DailyQuota != nil {
 		quota = dailyQuotaFn()
 	}
-	quotaState := readDailyQuota(quota, deps.Now, dryRun, out)
+	quotaState := resolveDailyQuota(quota, deps.Now, dryRun, out)
 
 	// Per-repo session eligibility (#1464), resolved before Decide so the gate
 	// sits ahead of the cap check and an ineligible repo never takes a slot. A
@@ -676,12 +780,14 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		// a dry run (returned above) or a failed spawn (continued above). A failed
 		// record is logged, not returned -- RunLoop treats a returned error as
 		// fatal. A corrupt, unknown-schema or symlinked file fails closed on the
-		// next pass's read, but a write failure that leaves a valid file undercounts
-		// until the state is writable again (known limitation, tracked as a
-		// follow-up).
+		// next pass's read. A failed record is kept as a pending launch (#1572): the
+		// next real pass records it in one write before reading the count and fails
+		// closed while that write fails, so the limit stays enforced. Only a process
+		// exit before then loses it.
 		if quota != nil {
 			if err := quota.Record(deps.Now); err != nil {
 				logf(out, "dispatch: #%d recording daily quota launch failed: %v\n", d.Ticket.Number, err)
+				addPendingLaunch(deps.Now)
 			}
 		}
 		// The resume path already claimed Working above, before the spawn;
@@ -714,7 +820,9 @@ var errConfigReload = errors.New("loading dispatch config")
 
 // RunLoop reloads Config from configPath and runs RunOnce immediately and then
 // on every interval tick. The daily quota (#1566), when set, lives in the
-// persisted capacity store, so it carries across ticks and restarts.
+// persisted capacity store, so it carries across ticks and restarts. A launch
+// whose recording failed (#1572) carries across ticks in memory only: a restart
+// loses it.
 // modelOverride, when non-empty (the --model CLI flag), is re-applied to Config
 // every tick, since each tick reloads Config fresh from disk and would
 // otherwise drop it. It blocks until the process exits.

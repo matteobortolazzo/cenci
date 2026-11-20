@@ -2,6 +2,8 @@ package capacity
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -456,5 +458,199 @@ func TestDailyQuotaErrorMessagesArePathFreeAndContractSafe(t *testing.T) {
 			t.Errorf("%q and %q share the message %q", name, prev, tc.err.Error())
 		}
 		seen[tc.err.Error()] = name
+	}
+}
+
+// -- RecordN (#1572): a batch of launches in one locked read-modify-write -------
+
+func TestDailyQuotaRecordNAddsToTodaysCountInOneWrite(t *testing.T) {
+	for _, n := range []int{1, 2, 7} {
+		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			dir := trustedDir(t)
+			seedQuota(t, dir, `{"schema":1,"date":"2026-11-19","used":1}`)
+			q := NewDailyQuota(dir)
+
+			if err := q.RecordN(day1Noon, n); err != nil {
+				t.Fatalf("RecordN: %v", err)
+			}
+
+			if got := mustUsed(t, q, day1Noon); got != 1+n {
+				t.Errorf("Used = %d, want %d (1 stored + %d)", got, 1+n, n)
+			}
+			want := fmt.Sprintf(`{"schema":1,"date":"2026-11-19","used":%d}`, 1+n)
+			if got := strings.TrimSpace(readQuotaBytes(t, dir)); got != want {
+				t.Errorf("persisted file = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestDailyQuotaRecordNOnAnotherDateCountsFromZeroOnToday(t *testing.T) {
+	for name, date := range map[string]string{
+		"earlier date": "2026-11-18",
+		"future date":  "2027-01-01",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := trustedDir(t)
+			seedQuota(t, dir, `{"schema":1,"date":"`+date+`","used":7}`)
+			q := NewDailyQuota(dir)
+
+			if err := q.RecordN(day1Noon, 3); err != nil {
+				t.Fatalf("RecordN: %v", err)
+			}
+
+			want := `{"schema":1,"date":"2026-11-19","used":3}`
+			if got := strings.TrimSpace(readQuotaBytes(t, dir)); got != want {
+				t.Errorf("persisted file = %s, want %s (the other day's count is not carried)", got, want)
+			}
+		})
+	}
+}
+
+func TestDailyQuotaRecordNOnAnAbsentStoreCreatesItAndCounts(t *testing.T) {
+	_, _, dir := storeDirs(t)
+	q := NewDailyQuota(dir)
+
+	if err := q.RecordN(day1Noon, 4); err != nil {
+		t.Fatalf("RecordN: %v", err)
+	}
+	if got := mustUsed(t, q, day1Noon); got != 4 {
+		t.Errorf("Used = %d, want 4", got)
+	}
+}
+
+func TestDailyQuotaRecordNSaturatesAtTheStoredBound(t *testing.T) {
+	cases := []struct {
+		name string
+		used int
+		n    int
+	}{
+		{"one below the bound plus five", maxUsed - 1, 5},
+		{"at the bound plus one", maxUsed, 1},
+		{"a huge n cannot overflow the sum", 1, math.MaxInt},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := trustedDir(t)
+			seedQuota(t, dir, fmt.Sprintf(`{"schema":1,"date":"2026-11-19","used":%d}`, tc.used))
+			q := NewDailyQuota(dir)
+
+			if err := q.RecordN(day1Noon, tc.n); err != nil {
+				t.Fatalf("RecordN: %v", err)
+			}
+			if got := mustUsed(t, q, day1Noon); got != maxUsed {
+				t.Errorf("Used = %d, want the bound %d", got, maxUsed)
+			}
+		})
+	}
+}
+
+// A batch of fewer than one launch is not an error and not a write: the store
+// is not even created, so no file, no lock file and no directory appears.
+func TestDailyQuotaRecordNBelowOneIsANoOpThatCreatesNothing(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
+			root, _, dir := storeDirs(t)
+			q := NewDailyQuota(dir)
+
+			if err := q.RecordN(day1Noon, n); err != nil {
+				t.Fatalf("RecordN(%d) = %v, want nil", n, err)
+			}
+			if names := listDir(t, root); len(names) != 0 {
+				t.Errorf("RecordN(%d) created %v under the state root", n, names)
+			}
+		})
+	}
+}
+
+// RecordN reports the store's own typed error for each unreadable state and,
+// like Record, never rewrites or writes through it.
+func TestDailyQuotaRecordNOnBrokenStateIsTheTypedErrorAndNeverRewritten(t *testing.T) {
+	t.Run("corrupt file", func(t *testing.T) {
+		dir := trustedDir(t)
+		seedQuota(t, dir, "garbage")
+
+		if err := NewDailyQuota(dir).RecordN(day1Noon, 3); !errors.Is(err, ErrCorrupt) {
+			t.Errorf("RecordN err = %v, want ErrCorrupt", err)
+		}
+		if got := readQuotaBytes(t, dir); got != "garbage" {
+			t.Errorf("file was rewritten: %q", got)
+		}
+	})
+
+	t.Run("unknown schema", func(t *testing.T) {
+		dir := trustedDir(t)
+		const content = `{"schema":2,"date":"2026-11-19","used":1}`
+		seedQuota(t, dir, content)
+
+		if err := NewDailyQuota(dir).RecordN(day1Noon, 3); !errors.Is(err, ErrUnknownSchema) {
+			t.Errorf("RecordN err = %v, want ErrUnknownSchema", err)
+		}
+		if got := readQuotaBytes(t, dir); got != content {
+			t.Errorf("file was rewritten: %q, want %q", got, content)
+		}
+	})
+
+	t.Run("symlinked file", func(t *testing.T) {
+		dir := trustedDir(t)
+		outside := filepath.Join(t.TempDir(), "outside.json")
+		const original = `{"schema":1,"date":"2026-11-19","used":1}`
+		if err := os.WriteFile(outside, []byte(original), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(dir, quotaFile)); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := NewDailyQuota(dir).RecordN(day1Noon, 3); !errors.Is(err, ErrNotRegular) {
+			t.Errorf("RecordN err = %v, want ErrNotRegular", err)
+		}
+		if got, _ := os.ReadFile(outside); string(got) != original {
+			t.Errorf("symlink target changed to %q", got)
+		}
+		if info, err := os.Lstat(filepath.Join(dir, quotaFile)); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("the symlink was replaced: %v, %v", info, err)
+		}
+	})
+
+	t.Run("symlinked directory", func(t *testing.T) {
+		_, parent, dir := storeDirs(t)
+		target := filepath.Join(t.TempDir(), "elsewhere")
+		for _, p := range []string{parent, target} {
+			if err := os.Mkdir(p, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(target, dir); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := NewDailyQuota(dir).RecordN(day1Noon, 3); !errors.Is(err, ErrUntrusted) {
+			t.Errorf("RecordN err = %v, want ErrUntrusted", err)
+		}
+		if names := listDir(t, target); len(names) != 0 {
+			t.Errorf("files written through the symlinked directory: %v", names)
+		}
+	})
+}
+
+func TestDailyQuotaRecordNWaitsForTheLock(t *testing.T) {
+	dir := trustedDir(t)
+	q := NewDailyQuota(dir)
+	mustRecord(t, q, day1Noon, 1)
+	q.store.lockTimeout = 100 * time.Millisecond
+
+	var recordErr error
+	if err := NewStore(dir).WithLock(func() error {
+		recordErr = q.RecordN(day1Noon, 2)
+		return nil
+	}); err != nil {
+		t.Fatalf("WithLock: %v", err)
+	}
+	if !errors.Is(recordErr, ErrLockUnavailable) {
+		t.Errorf("RecordN under a held lock err = %v, want ErrLockUnavailable", recordErr)
+	}
+	if n := mustPeek(t, q, day1Noon); n != 1 {
+		t.Errorf("count after the refused RecordN = %d, want 1", n)
 	}
 }

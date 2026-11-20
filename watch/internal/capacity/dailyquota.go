@@ -129,11 +129,21 @@ func (q *DailyQuota) Peek(now time.Time) (int, error) {
 	return usedOn(st, day(now)), nil
 }
 
-// Record counts one launch on now's local day. It reads and writes under the
-// store lock, so concurrent recorders in any process lose no launch. A stored
-// date other than today restarts the count at 1; an unreadable file is an
-// error and is left untouched.
+// Record counts one launch on now's local day. It is RecordN(now, 1).
 func (q *DailyQuota) Record(now time.Time) error {
+	return q.RecordN(now, 1)
+}
+
+// RecordN counts n launches on now's local day in one locked read-modify-write,
+// so concurrent recorders in any process lose no launch and a failure never
+// leaves part of the n recorded. A stored date other than today restarts the
+// count at n; the count saturates at maxUsed. An n below 1 returns nil before
+// the lock is taken, so it creates and writes nothing. An unreadable file is an
+// error and is left untouched.
+func (q *DailyQuota) RecordN(now time.Time, n int) error {
+	if n < 1 {
+		return nil
+	}
 	today := day(now)
 	return q.store.WithLock(func() error {
 		st, err := q.load()
@@ -141,8 +151,10 @@ func (q *DailyQuota) Record(now time.Time) error {
 			return err
 		}
 		used := usedOn(st, today)
-		if used < maxUsed {
-			used++
+		if n > maxUsed-used {
+			used = maxUsed
+		} else {
+			used += n
 		}
 		out, err := json.Marshal(quotaState{Schema: quotaSchema, Date: today, Used: used})
 		if err != nil {

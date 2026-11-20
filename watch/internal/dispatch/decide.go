@@ -1276,6 +1276,11 @@ const (
 	// reasonDailyQuotaNotRead is the reason for a set quota whose Inputs.DailyQuota
 	// was never populated: a zero-value state is never permissive.
 	reasonDailyQuotaNotRead = "not read this pass"
+	// reasonDailyQuotaRecordPending is the dry-run reason when launches from today
+	// are still unrecorded in the persisted count: a dry run never writes, so the
+	// count cannot be trusted. It is fixed text, path-free, and never contains
+	// " dispatch " or " skip:".
+	reasonDailyQuotaRecordPending = "unrecorded launch pending"
 	// reasonTokenBudgetExhausted is the token gate's skip reason. The limits
 	// behind it are local estimates, never provider entitlement.
 	reasonTokenBudgetExhausted = "estimated token budget exhausted"
