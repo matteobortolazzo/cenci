@@ -69,8 +69,36 @@ func pointQuotaSeam(t *testing.T, dir string) *int {
 		*calls++
 		return capacity.NewDailyQuota(dir)
 	}
-	t.Cleanup(func() { dailyQuotaFn = prev })
+	// Launches whose record failed are carried in memory (#1572): one test's
+	// pending launches must never reach the next, so the seam's cleanup drops them.
+	t.Cleanup(func() {
+		dailyQuotaFn = prev
+		resetPendingLaunches()
+	})
 	return calls
+}
+
+// readOnlyQuotaDir makes the capacity directory unwritable (0500) while leaving
+// it trusted and readable, so a read still works and a write fails with the
+// store's ErrIO (CreateTemp cannot create the temp file). It returns a function
+// that restores write access mid-test; a cleanup restores it too, so TempDir can
+// remove the directory. Root bypasses directory permissions, so it skips there,
+// as loop_test.go does.
+func readOnlyQuotaDir(t *testing.T, dir string) (restore func()) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses directory permissions; cannot simulate a read-only capacity directory")
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("making the capacity directory read-only: %v", err)
+	}
+	restore = func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatalf("restoring write access to the capacity directory: %v", err)
+		}
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	return restore
 }
 
 // quotaUsed reads the persisted launch count on now's local day, failing the
@@ -4139,15 +4167,7 @@ func TestApplyDispatch_UnreadableQuotaStateBlocksDispatchAndWritesNothing(t *tes
 			if want := "dispatch: daily quota state unreadable: " + tc.want.Error() + "\n"; strings.Count(log, want) != 1 {
 				t.Errorf("log must carry %q exactly once:\n%s", want, log)
 			}
-			if want := "o/r#42 skip: " + reason; !strings.Contains(log, want) {
-				t.Errorf("log lacks the skip line %q:\n%s", want, log)
-			}
-			// The reason must keep both lazyboards substrings out of the skip line.
-			for _, line := range strings.Split(log, "\n") {
-				if strings.Contains(line, "o/r#42 skip:") && (strings.Count(line, " skip:") != 1 || strings.Contains(line, " dispatch ")) {
-					t.Errorf("skip line %q breaks the substring contract", line)
-				}
-			}
+			assertSkipLine(t, log, 42, reason)
 			if after := snapshotOf(); !reflect.DeepEqual(before, after) {
 				t.Errorf("a pass wrote through or over the unreadable state:\n before %v\n after  %v", before, after)
 			}
@@ -4218,4 +4238,493 @@ func TestApplyDispatch_FailedQuotaRecordIsLoggedNotReturned(t *testing.T) {
 	if spawns != 1 {
 		t.Errorf("spawns = %d, want the broken file to hold the next pass", spawns)
 	}
+	// The hold is the flush of the one unrecorded launch failing (#1572): it is
+	// logged once, as the pending line, and the corrupt bytes stay untouched.
+	if want := pendingLine(1, capacity.ErrCorrupt.Error()); strings.Count(buf.String(), want) != 1 {
+		t.Errorf("log must carry %q exactly once:\n%s", want, buf.String())
+	}
+	assertSkipLine(t, buf.String(), 42, "daily quota state unreadable: "+capacity.ErrCorrupt.Error())
+	if got, _ := os.ReadFile(file); string(got) != "{broken mid-pass" {
+		t.Errorf("the next pass rewrote the corrupt file: %q", got)
+	}
+	assertPending(t, now, 1)
+}
+
+// -- #1572: launches whose record failed are carried and flushed ---------------
+
+// pendingFixture is the shared setup for the pending-launch tests: a capacity
+// directory holding `used: 1` for the pass's local day, made read-only so the
+// next record fails with ErrIO while the file stays valid and readable.
+type pendingFixture struct {
+	q   *capacity.DailyQuota
+	dir string
+	now time.Time
+	// restore gives the capacity directory its write access back mid-test.
+	restore func()
+}
+
+func newPendingFixture(t *testing.T) pendingFixture {
+	t.Helper()
+	q, dir := useQuotaDirPath(t)
+	now := localAt(2026, time.July, 10, 12, 0)
+	if err := q.Record(now); err != nil {
+		t.Fatalf("seeding the quota: %v", err)
+	}
+	return pendingFixture{q: q, dir: dir, now: now, restore: readOnlyQuotaDir(t, dir)}
+}
+
+// ioReason is the path-free text of the store's write failure under a read-only
+// capacity directory, which is what a failed record and a failed flush carry.
+var ioReason = capacity.ErrIO.Error()
+
+// quotaPass runs one applyDispatch pass with the given daily quota (nil is the
+// quota off) and returns its decisions and log.
+func quotaPass(t *testing.T, limit *int, deps dispatchDeps, dryRun bool) ([]Decision, string) {
+	t.Helper()
+	cfg := dispatchTestConfig()
+	cfg.DailyQuota = limit
+	var buf bytes.Buffer
+	decisions, err := applyDispatch(cfg, deps, fakeController{}, &fakeMutator{}, dryRun, &buf)
+	if err != nil {
+		t.Fatalf("applyDispatch returned %v, want failures logged only", err)
+	}
+	return decisions, buf.String()
+}
+
+// spawnsReadingQuota swaps runFn for a stub that records the persisted count on
+// the local day *at as each spawn happens, so a test sees what the pass's gate
+// read just before it admitted the launch.
+func spawnsReadingQuota(t *testing.T, q *capacity.DailyQuota, at *time.Time) *[]int {
+	t.Helper()
+	var seen []int
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		seen = append(seen, quotaUsed(t, q, *at))
+		return nil
+	})
+	return &seen
+}
+
+// pendingLine is the once-per-pass log line a failed flush produces.
+func pendingLine(n int, reason string) string {
+	return fmt.Sprintf("dispatch: daily quota: %d unrecorded launch(es) pending: %s\n", n, reason)
+}
+
+// assertSkipLine checks that the log carries ticket number's skip line with
+// reason, and that every skip line keeps the lazyboards substring contract: one
+// " skip:" and no " dispatch ".
+func assertSkipLine(t *testing.T, log string, number int, reason string) {
+	t.Helper()
+	want := fmt.Sprintf("o/r#%d skip: %s", number, reason)
+	found := false
+	for _, line := range strings.Split(log, "\n") {
+		if !strings.Contains(line, " skip:") {
+			continue
+		}
+		if strings.Count(line, " skip:") != 1 || strings.Contains(line, " dispatch ") {
+			t.Errorf("skip line %q breaks the substring contract", line)
+		}
+		if strings.Contains(line, want) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("log lacks the skip line %q:\n%s", want, log)
+	}
+}
+
+// assertPending checks the in-memory pending count and, when it is non-zero,
+// that it is tagged with at's local day.
+func assertPending(t *testing.T, at time.Time, n int) {
+	t.Helper()
+	day, got := pendingLaunchState()
+	if got != n {
+		t.Errorf("pending launches = %d, want %d", got, n)
+	}
+	if n > 0 && day != at.Format("2006-01-02") {
+		t.Errorf("pending day = %q, want %q", day, at.Format("2006-01-02"))
+	}
+}
+
+// A launch whose record fails on a valid state file is logged, not returned,
+// still reported as spawned; the next real pass, while recording still fails,
+// skips every candidate with the flush error as the reason, spawns nothing and
+// logs the pending line once.
+func TestApplyDispatch_FailedRecordOnValidFileHoldsTheNextPassClosed(t *testing.T) {
+	f := newPendingFixture(t)
+	at := f.now
+	seen := spawnsReadingQuota(t, f.q, &at)
+
+	decisions, log := quotaPass(t, quotaPtr(5), dispatchableDeps(f.now), false)
+	if countSpawned(decisions) != 1 || len(*seen) != 1 {
+		t.Fatalf("pass 1: decisions = %+v, spawns = %d, want one launch reported as spawned", decisions, len(*seen))
+	}
+	if want := "dispatch: #42 recording daily quota launch failed: " + ioReason; !strings.Contains(log, want) {
+		t.Errorf("pass 1 log lacks %q:\n%s", want, log)
+	}
+	assertPending(t, f.now, 1)
+
+	decisions, log = quotaPass(t, quotaPtr(5), dispatchableDeps(f.now.Add(time.Minute)), false)
+	reason := "daily quota state unreadable: " + ioReason
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, reason, ""}})
+	assertSkipLine(t, log, 42, reason)
+	if want := pendingLine(1, ioReason); strings.Count(log, want) != 1 {
+		t.Errorf("pass 2 log must carry %q exactly once:\n%s", want, log)
+	}
+	if strings.Contains(log, "dispatch: daily quota state unreadable") {
+		t.Errorf("a failed flush must not also log the ordinary unreadable line:\n%s", log)
+	}
+	if len(*seen) != 1 {
+		t.Errorf("spawns = %d, want the failed flush to hold the pass", len(*seen))
+	}
+	if got := quotaUsed(t, f.q, f.now); got != 1 {
+		t.Errorf("persisted used = %d, want 1 (nothing could be written)", got)
+	}
+	assertPending(t, f.now, 1)
+}
+
+// Once the store is writable again, the next real pass persists the pending
+// launch (1 + 1 = 2) before it decides, clears the pending count and dispatches
+// a candidate, because 2 < 5.
+func TestApplyDispatch_RecoveryPersistsThePendingLaunchBeforeDeciding(t *testing.T) {
+	f := newPendingFixture(t)
+	at := f.now
+	seen := spawnsReadingQuota(t, f.q, &at)
+	quotaPass(t, quotaPtr(5), dispatchableDeps(f.now), false)
+	assertPending(t, f.now, 1)
+	f.restore()
+
+	decisions, log := quotaPass(t, quotaPtr(5), dispatchableDeps(f.now.Add(time.Minute)), false)
+
+	assertDecisions(t, decisions, []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+	if want := []int{1, 2}; !reflect.DeepEqual(*seen, want) {
+		t.Errorf("persisted count at each spawn = %v, want %v (the flush lands before the recovery pass decides)", *seen, want)
+	}
+	assertPending(t, f.now, 0)
+	if got := quotaUsed(t, f.q, f.now); got != 3 {
+		t.Errorf("persisted used = %d, want 3 (1 seeded + 1 flushed + the recovery launch)", got)
+	}
+	if strings.Contains(log, "unrecorded launch") {
+		t.Errorf("a successful flush logs nothing:\n%s", log)
+	}
+}
+
+// With dailyQuota 2, `used: 1` persisted and 1 pending launch, the first pass
+// after recovery persists 2 and skips every candidate with "daily quota reached".
+func TestApplyDispatch_RecoveredPendingLaunchCanReachTheLimit(t *testing.T) {
+	f := newPendingFixture(t)
+	at := f.now
+	seen := spawnsReadingQuota(t, f.q, &at)
+	quotaPass(t, quotaPtr(2), dispatchableDeps(f.now), false)
+	assertPending(t, f.now, 1)
+	f.restore()
+	failOnSpawn(t)
+
+	decisions, log := quotaPass(t, quotaPtr(2), dispatchableDeps(f.now.Add(time.Minute)), false)
+
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "daily quota reached", ""}})
+	assertSkipLine(t, log, 42, "daily quota reached")
+	if got := quotaUsed(t, f.q, f.now); got != 2 {
+		t.Errorf("persisted used = %d, want 2 (the pending launch is recorded)", got)
+	}
+	assertPending(t, f.now, 0)
+	if len(*seen) != 1 {
+		t.Errorf("spawns = %d, want only the first pass's launch", len(*seen))
+	}
+}
+
+// Two successful spawns in one pass whose records both fail leave 2 pending
+// launches; after recovery the persisted count rises by exactly 2, even in a
+// pass with nothing to dispatch.
+func TestApplyDispatch_TwoFailedRecordsAreFlushedAsOneBatchOfTwo(t *testing.T) {
+	f := newPendingFixture(t)
+	at := f.now
+	seen := spawnsReadingQuota(t, f.q, &at)
+
+	decisions, log := quotaPass(t, quotaPtr(10), plannedAcross(f.now, repoTicket{"o/r", 42}, repoTicket{"o/r", 43}), false)
+	if countSpawned(decisions) != 2 || len(*seen) != 2 {
+		t.Fatalf("decisions = %+v, spawns = %d, want both tickets spawned", decisions, len(*seen))
+	}
+	for _, n := range []int{42, 43} {
+		if want := fmt.Sprintf("dispatch: #%d recording daily quota launch failed: %s", n, ioReason); !strings.Contains(log, want) {
+			t.Errorf("log lacks %q:\n%s", want, log)
+		}
+	}
+	assertPending(t, f.now, 2)
+	f.restore()
+
+	decisions, _ = quotaPass(t, quotaPtr(10), plannedAcross(f.now.Add(time.Minute)), false)
+
+	if len(decisions) != 0 {
+		t.Fatalf("decisions = %+v, want a pass with no candidate", decisions)
+	}
+	if got := quotaUsed(t, f.q, f.now); got != 3 {
+		t.Errorf("persisted used = %d, want 3 (1 seeded + exactly the 2 pending launches)", got)
+	}
+	assertPending(t, f.now, 0)
+}
+
+// A dry run with launches pending for today writes nothing -- not the bytes, not
+// the modification time, not a stray file -- skips every candidate with the fixed
+// reason, logs once, and leaves the pending count alone.
+func TestApplyDispatchDryRun_PendingLaunchHoldsAndWritesNothing(t *testing.T) {
+	f := newPendingFixture(t)
+	at := f.now
+	spawnsReadingQuota(t, f.q, &at)
+	quotaPass(t, quotaPtr(5), dispatchableDeps(f.now), false)
+	assertPending(t, f.now, 1)
+	// Writable again, so a dry run that wrongly flushed would succeed and show.
+	f.restore()
+	file := filepath.Join(f.dir, quotaFileName)
+	beforeBytes, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEntries, _ := os.ReadDir(f.dir)
+	failOnSpawn(t)
+
+	decisions, log := quotaPass(t, quotaPtr(5), dispatchableDeps(f.now.Add(time.Minute)), true)
+
+	reason := "daily quota state unreadable: unrecorded launch pending"
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, reason, ""}})
+	assertSkipLine(t, log, 42, reason)
+	if want := "dispatch: daily quota: 1 unrecorded launch(es) pending (dry run, not recorded)\n"; strings.Count(log, want) != 1 {
+		t.Errorf("log must carry %q exactly once:\n%s", want, log)
+	}
+	afterBytes, _ := os.ReadFile(file)
+	afterInfo, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeBytes, afterBytes) || !afterInfo.ModTime().Equal(beforeInfo.ModTime()) {
+		t.Errorf("a dry run wrote the quota file: %q -> %q", beforeBytes, afterBytes)
+	}
+	if afterEntries, _ := os.ReadDir(f.dir); len(afterEntries) != len(beforeEntries) {
+		t.Errorf("a dry run changed the capacity directory: %d -> %d entries", len(beforeEntries), len(afterEntries))
+	}
+	assertPending(t, f.now, 1)
+}
+
+// A dry run on a later local day does not count the earlier day's pending
+// launches and does not drop them either: it reads, holds nothing and changes
+// no state.
+func TestApplyDispatchDryRun_EarlierDaysPendingLaunchesAreIgnoredAndKept(t *testing.T) {
+	f := newPendingFixture(t)
+	at := f.now
+	spawnsReadingQuota(t, f.q, &at)
+	quotaPass(t, quotaPtr(5), dispatchableDeps(f.now), false)
+	assertPending(t, f.now, 1)
+	f.restore()
+	failOnSpawn(t)
+
+	nextDay := f.now.Add(24 * time.Hour)
+	decisions, log := quotaPass(t, quotaPtr(5), dispatchableDeps(nextDay), true)
+
+	if len(decisions) != 1 || decisions[0].Action != ActionDispatch {
+		t.Errorf("decisions = %+v, want the candidate admitted (nothing is pending for this day)", decisions)
+	}
+	if strings.Contains(log, "unrecorded launch") {
+		t.Errorf("an earlier day's pending launch must not be reported:\n%s", log)
+	}
+	assertPending(t, f.now, 1)
+}
+
+// With the quota off and launches pending, a real pass never asks for the
+// counter (call count 0), dispatches normally and leaves the pending count
+// alone; once the quota is set again on the same local day the next real pass
+// flushes it.
+func TestApplyDispatch_QuotaOffNeverTouchesPendingLaunchesAndSettingItAgainFlushes(t *testing.T) {
+	f := newPendingFixture(t)
+	calls := pointQuotaSeam(t, f.dir)
+	at := f.now
+	seen := spawnsReadingQuota(t, f.q, &at)
+	quotaPass(t, quotaPtr(5), dispatchableDeps(f.now), false)
+	assertPending(t, f.now, 1)
+	f.restore()
+
+	before := *calls
+	decisions, log := quotaPass(t, nil, dispatchableDeps(f.now.Add(time.Minute)), false)
+
+	assertDecisions(t, decisions, []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+	if *calls != before {
+		t.Errorf("the quota seam was called %d times with the quota off, want 0", *calls-before)
+	}
+	if strings.Contains(log, "daily quota") {
+		t.Errorf("a pass with the quota off must log nothing about it:\n%s", log)
+	}
+	assertPending(t, f.now, 1)
+
+	quotaPass(t, quotaPtr(5), dispatchableDeps(f.now.Add(2*time.Minute)), false)
+
+	// Pass 1 saw the seeded 1, the quota-off pass flushed nothing (still 1), and
+	// the pass that set the quota again flushed the pending launch first (2).
+	if want := []int{1, 1, 2}; !reflect.DeepEqual(*seen, want) {
+		t.Errorf("persisted count at each spawn = %v, want %v", *seen, want)
+	}
+	assertPending(t, f.now, 0)
+}
+
+// A launch pending on local day D is discarded at the first real pass on D+1:
+// nothing is written for it, the gate reads D+1's own count (so a quota of 1
+// still admits), and the pending count is 0 afterwards.
+func TestApplyDispatch_PendingLaunchFromAnEarlierDayIsDiscarded(t *testing.T) {
+	f := newPendingFixture(t)
+	at := f.now
+	seen := spawnsReadingQuota(t, f.q, &at)
+	quotaPass(t, quotaPtr(5), dispatchableDeps(f.now), false)
+	assertPending(t, f.now, 1)
+	f.restore()
+
+	nextDay := f.now.Add(24 * time.Hour)
+	at = nextDay
+	decisions, log := quotaPass(t, quotaPtr(1), dispatchableDeps(nextDay), false)
+
+	assertDecisions(t, decisions, []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+	if want := []int{1, 0}; !reflect.DeepEqual(*seen, want) {
+		t.Errorf("persisted count at each spawn = %v, want %v (the earlier day's launch is not carried onto the new day)", *seen, want)
+	}
+	if strings.Contains(log, "unrecorded launch") {
+		t.Errorf("a discarded launch logs nothing:\n%s", log)
+	}
+	assertPending(t, nextDay, 0)
+	if got := quotaUsed(t, f.q, nextDay); got != 1 {
+		t.Errorf("used on the new day = %d, want 1 (only the new day's own launch)", got)
+	}
+}
+
+// The flush succeeds but the Used read that follows fails: the pass skips every
+// candidate with the ordinary unreadable reason, and the flushed launch stays
+// persisted.
+func TestApplyDispatch_FlushThenUnreadableReadStaysClosedAndKeepsTheFlush(t *testing.T) {
+	f := newPendingFixture(t)
+	at := f.now
+	spawnsReadingQuota(t, f.q, &at)
+	quotaPass(t, quotaPtr(5), dispatchableDeps(f.now), false)
+	assertPending(t, f.now, 1)
+	f.restore()
+
+	readReason := capacity.ErrLockUnavailable.Error()
+	persistedAtRead := -1
+	prev := readDailyQuotaFn
+	readDailyQuotaFn = func(_ *capacity.DailyQuota, _ time.Time, _ bool, out io.Writer) DailyQuotaState {
+		persistedAtRead = quotaUsed(t, f.q, f.now)
+		logf(out, "dispatch: daily quota state unreadable: %s\n", readReason)
+		return DailyQuotaState{Unreadable: readReason}
+	}
+	t.Cleanup(func() { readDailyQuotaFn = prev })
+	failOnSpawn(t)
+
+	decisions, log := quotaPass(t, quotaPtr(5), dispatchableDeps(f.now.Add(time.Minute)), false)
+
+	reason := "daily quota state unreadable: " + readReason
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, reason, ""}})
+	assertSkipLine(t, log, 42, reason)
+	if persistedAtRead != 2 {
+		t.Errorf("persisted count when the read ran = %d, want 2 (the flush lands first)", persistedAtRead)
+	}
+	if got := quotaUsed(t, f.q, f.now); got != 2 {
+		t.Errorf("persisted used = %d, want 2 (the flushed launch stays persisted)", got)
+	}
+	if strings.Contains(log, "unrecorded launch") {
+		t.Errorf("the flush succeeded, so the pass must not log a pending line:\n%s", log)
+	}
+	assertPending(t, f.now, 0)
+}
+
+// A lock timeout on the flush fails the pass closed with the lock reason; the
+// next pass with the lock free flushes the same pending launch and resumes. The
+// held lock makes this one test wait out the store's own 3s lock timeout.
+func TestApplyDispatch_FlushLockTimeoutFailsClosedThenRecovers(t *testing.T) {
+	f := newPendingFixture(t)
+	at := f.now
+	seen := spawnsReadingQuota(t, f.q, &at)
+	quotaPass(t, quotaPtr(5), dispatchableDeps(f.now), false)
+	assertPending(t, f.now, 1)
+	f.restore()
+
+	var decisions []Decision
+	var log string
+	err := capacity.NewStore(f.dir).WithLock(func() error {
+		decisions, log = quotaPass(t, quotaPtr(5), dispatchableDeps(f.now.Add(time.Minute)), false)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("taking the capacity lock: %v", err)
+	}
+
+	lockReason := capacity.ErrLockUnavailable.Error()
+	reason := "daily quota state unreadable: " + lockReason
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, reason, ""}})
+	assertSkipLine(t, log, 42, reason)
+	if want := pendingLine(1, lockReason); strings.Count(log, want) != 1 {
+		t.Errorf("log must carry %q exactly once:\n%s", want, log)
+	}
+	if len(*seen) != 1 {
+		t.Errorf("spawns = %d, want the held lock to hold the pass", len(*seen))
+	}
+	assertPending(t, f.now, 1)
+
+	decisions, _ = quotaPass(t, quotaPtr(5), dispatchableDeps(f.now.Add(2*time.Minute)), false)
+
+	assertDecisions(t, decisions, []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+	if want := []int{1, 2}; !reflect.DeepEqual(*seen, want) {
+		t.Errorf("persisted count at each spawn = %v, want %v (the next pass flushes before it decides)", *seen, want)
+	}
+	assertPending(t, f.now, 0)
+}
+
+// A failed spawn never reaches the record, so it adds nothing to the pending
+// count -- even when a record would have failed.
+func TestApplyDispatch_FailedSpawnAddsNothingToThePendingCount(t *testing.T) {
+	f := newPendingFixture(t)
+	stubRunFn(t, func(run.Opts, run.Controller) error { return errors.New("spawn failed") })
+	cfg := dispatchTestConfig()
+	cfg.DailyQuota = quotaPtr(5)
+
+	var buf bytes.Buffer
+	decisions, _ := applyDispatch(cfg, dispatchableDeps(f.now), fakeController{}, &fakeMutator{}, false, &buf)
+
+	if countSpawned(decisions) != 0 {
+		t.Errorf("decisions = %+v, want no launch reported as spawned", decisions)
+	}
+	if strings.Contains(buf.String(), "recording daily quota launch failed") {
+		t.Errorf("a failed spawn must not try to record:\n%s", buf.String())
+	}
+	assertPending(t, f.now, 0)
+}
+
+// A dry run spawns and records nothing, so it adds nothing to the pending count.
+func TestApplyDispatchDryRun_AddsNothingToThePendingCount(t *testing.T) {
+	f := newPendingFixture(t)
+	failOnSpawn(t)
+
+	decisions, log := quotaPass(t, quotaPtr(5), dispatchableDeps(f.now), true)
+
+	if countSpawned(decisions) != 0 {
+		t.Errorf("decisions = %+v, want no launch reported as spawned in a dry run", decisions)
+	}
+	if strings.Contains(log, "recording daily quota launch failed") || strings.Contains(log, "unrecorded launch") {
+		t.Errorf("a dry run must neither record nor report pending launches:\n%s", log)
+	}
+	assertPending(t, f.now, 0)
+}
+
+// The pending count is reset by pointQuotaSeam's cleanup, so one test's pending
+// launches never reach another test: the second subtest runs right after the
+// first, which leaves a launch pending.
+func TestPendingLaunches_DoNotLeakBetweenTests(t *testing.T) {
+	t.Run("leaves one launch pending", func(t *testing.T) {
+		f := newPendingFixture(t)
+		at := f.now
+		spawnsReadingQuota(t, f.q, &at)
+		quotaPass(t, quotaPtr(5), dispatchableDeps(f.now), false)
+		assertPending(t, f.now, 1)
+	})
+	t.Run("starts from zero", func(t *testing.T) {
+		useQuotaDir(t)
+		assertPending(t, time.Time{}, 0)
+	})
 }
