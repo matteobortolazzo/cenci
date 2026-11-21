@@ -36,8 +36,8 @@ to that owner instead of spawning its own specialist.
   frontmatter: if that override is set, preserve it and report that the specialist
   ran under the override, not that Fable ran. Do not change environment settings.
 - **Codex:** use `agent_type="domain-specialist"`, whose installed role pins
-  `gpt-6-astra` at high effort. If that role is not available, use a built-in worker
-  with `fork_turns="none"`, `model="gpt-6-astra"`, and `reasoning_effort="high"`,
+  `gpt-6.2-astra` at high effort. If that role is not available, use a built-in worker
+  with `fork_turns="none"`, `model="gpt-6.2-astra"`, and `reasoning_effort="high"`,
   explicitly supplying the specialist instructions from the role template plus the
   bounded context below. Do not override a fixed-model role or combine an explicit
   model with full-history inheritance. Honor an explicitly customized installed

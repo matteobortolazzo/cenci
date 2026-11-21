@@ -97,7 +97,7 @@ for role in $NORMAL_ROLES; do
     fail "template $role: must omit model and model_reasoning_effort so the role inherits"
   fi
 done
-expect_has_line "template domain-specialist keeps its pinned model" "$TEMPLATES/domain-specialist.toml" 'model = "gpt-6-astra"'
+expect_has_line "template domain-specialist keeps its pinned model" "$TEMPLATES/domain-specialist.toml" 'model = "gpt-6.2-astra"'
 expect_has_line "template domain-specialist keeps its pinned effort" "$TEMPLATES/domain-specialist.toml" 'model_reasoning_effort = "high"'
 bash "$VALIDATE" "$TEMPLATES" >"$T/out" 2>"$T/err"; RC=$?
 expect_rc "templates validate" 0
@@ -217,7 +217,7 @@ model_reasoning_effort = "high"'
 write_role "$AGENTS" implementer 'model = "my-own-model"
 model_reasoning_effort = "low"'
 write_role "$AGENTS" critical-reviewer ""
-write_role "$AGENTS" domain-specialist 'model = "gpt-6-astra"
+write_role "$AGENTS" domain-specialist 'model = "gpt-6.2-astra"
 model_reasoning_effort = "high"'
 snapshot "$AGENTS" "$T/snap-user"
 install "$ROOT"
@@ -257,7 +257,7 @@ model_reasoning_effort = "high"'                       # acceptance-reviewer nev
 write_role "$AGENTS" context-gatherer 'model = "gpt-5.6-terra"
 model_reasoning_effort = "medium"'                     # eligible
 write_role "$AGENTS" structure-analyzer ""             # no pin: never offered
-write_role "$AGENTS" domain-specialist 'model = "gpt-6-astra"
+write_role "$AGENTS" domain-specialist 'model = "gpt-6.2-astra"
 model_reasoning_effort = "high"'                       # no shipped default: never offered
 snapshot "$AGENTS" "$T/snap-mig"
 install "$ROOT" --migrate-preview

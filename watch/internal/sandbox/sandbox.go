@@ -46,8 +46,8 @@ var ClaudeModelShortcuts = map[string]string{
 var CodexModelShortcuts = map[string]string{
 	"xl": "gpt-6-luna",
 	"xt": "gpt-6.1-terra",
-	"xa": "gpt-6-astra",
-	"xs": "gpt-6.1-sol",
+	"xa": "gpt-6.2-astra",
+	"xs": "gpt-6.2-sol",
 }
 
 // ResolveShortcut returns the agent and model a one-token shortcut (ch/cs/co/cf,
