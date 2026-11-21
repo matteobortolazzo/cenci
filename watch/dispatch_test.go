@@ -1194,6 +1194,9 @@ func TestDispatchPassFailuresExitNonzero(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(`{"dispatch":{"repos":[{"repo":"o/r","dir":"/definitely/missing-cenci-repo"}]}}`), 0o600); err != nil {
 		t.Fatalf("writing config: %v", err)
 	}
+	// The passes run with --config, so admission also reads the default fleet config
+	// (#1578): an empty XDG_CONFIG_HOME keeps it off the developer's real one.
+	env := append(os.Environ(), "XDG_CONFIG_HOME="+t.TempDir())
 	for _, args := range [][]string{
 		{"dispatch", "--once", "--config", configPath},
 		{"dispatch", "--dry-run", "--config", configPath},
@@ -1201,6 +1204,7 @@ func TestDispatchPassFailuresExitNonzero(t *testing.T) {
 		{"dispatch", "--interval", "1s", "--config", configPath},
 	} {
 		cmd := exec.Command(binaryPath, args...)
+		cmd.Env = env
 		output, err := cmd.CombinedOutput()
 		exitErr, ok := err.(*exec.ExitError)
 		if !ok || exitErr.ExitCode() != 1 {
@@ -1520,7 +1524,7 @@ func TestDispatchStatusFilters_InvalidFiltersExit1WithoutDispatching(t *testing.
 	if err := os.WriteFile(filepath.Join(ghDir, "gh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	env := append(os.Environ(), "PATH="+ghDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	env := append(os.Environ(), "PATH="+ghDir+string(os.PathListSeparator)+os.Getenv("PATH"), "XDG_CONFIG_HOME="+t.TempDir())
 
 	dir := initGitRemote(t, "git@github.com:owner/name.git")
 	configPath := writeFilteredStatusConfig(t, dir, `{"milestones": [3, 0]}`)
@@ -1598,8 +1602,18 @@ func noContainerRuntimesPath(t *testing.T) string {
 
 // capacityStatusRun runs `cenci dispatch status` for owner/name with the machine
 // cap and the repo's own cap (nil for none) in the config, XDG_STATE_HOME at
-// stateHome, and either the daemon double serving snap or no daemon at all.
+// stateHome, and either the daemon double serving snap or no daemon at all. The
+// default fleet config is the one in an empty XDG_CONFIG_HOME of the test's own, so
+// the run (which passes --config) never reads the developer's real one.
 func capacityStatusRun(t *testing.T, stateHome string, machineCap int, repoCap *int, snap *watch.StateSnapshot, extraArgs ...string) (string, error) {
+	t.Helper()
+	return capacityStatusRunWithDefault(t, stateHome, t.TempDir(), machineCap, repoCap, snap, extraArgs...)
+}
+
+// capacityStatusRunWithDefault is capacityStatusRun with the XDG_CONFIG_HOME the
+// binary resolves its default fleet config in: a test that wants a default file
+// writes it with writeConfigJSON(t, home, body) and passes <home>/.config.
+func capacityStatusRunWithDefault(t *testing.T, stateHome, configHome string, machineCap int, repoCap *int, snap *watch.StateSnapshot, extraArgs ...string) (string, error) {
 	t.Helper()
 	if snap != nil {
 		serveDaemonSnapshot(t, *snap)
@@ -1618,7 +1632,7 @@ func capacityStatusRun(t *testing.T, stateHome string, machineCap int, repoCap *
 	}
 	args := append([]string{"dispatch", "status", "--dir", dir, "--config", configPath}, extraArgs...)
 	cmd := exec.Command(binaryPath, args...)
-	cmd.Env = append(os.Environ(), "XDG_STATE_HOME="+stateHome, "PATH="+noContainerRuntimesPath(t))
+	cmd.Env = append(os.Environ(), "XDG_STATE_HOME="+stateHome, "XDG_CONFIG_HOME="+configHome, "PATH="+noContainerRuntimesPath(t))
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -1744,6 +1758,77 @@ func TestDispatchStatus_CapacityLine_UnreadableLedger(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(path); string(got) != corrupt {
 		t.Errorf("a status read rewrote the ledger: %q", got)
+	}
+}
+
+// (#1578) Under `--config <alt>` the capacity lines show the limits dispatch really
+// admits under, the stricter of the alternate and the default fleet config: the
+// effective machine cap as <total> and the effective repo cap as <cap>.
+func TestDispatchStatus_CapacityLines_UnderAnAlternateConfigShowTheStricterLimits(t *testing.T) {
+	tests := []struct {
+		name       string
+		defaultCfg string
+		altMachine int
+		altRepoCap *int
+		want       []string
+	}{
+		{
+			name:       "the default machine and repo caps are stricter",
+			defaultCfg: `{"dispatch":{"concurrencyCap":2,"repos":[{"repo":"owner/name","concurrencyCap":1}]}}`,
+			altMachine: 5, altRepoCap: intPtr(3),
+			want: []string{"capacity: 0/2 slots\n", "capacity owner/name: 0/1 slots\n"},
+		},
+		{
+			name:       "the alternate caps are stricter",
+			defaultCfg: `{"dispatch":{"concurrencyCap":4,"repos":[{"repo":"owner/name","concurrencyCap":3}]}}`,
+			altMachine: 2, altRepoCap: intPtr(1),
+			want: []string{"capacity: 0/2 slots\n", "capacity owner/name: 0/1 slots\n"},
+		},
+		{
+			name:       "a repo cap only in the default file applies",
+			defaultCfg: `{"dispatch":{"concurrencyCap":4,"repos":[{"repo":"owner/name","concurrencyCap":1}]}}`,
+			altMachine: 4, altRepoCap: nil,
+			want: []string{"capacity: 0/4 slots\n", "capacity owner/name: 0/1 slots\n"},
+		},
+		{
+			name:       "a repo cap above the effective machine cap is clamped to it",
+			defaultCfg: `{"dispatch":{"concurrencyCap":2}}`,
+			altMachine: 5, altRepoCap: intPtr(5),
+			want: []string{"capacity: 0/2 slots\n", "capacity owner/name: 0/2 slots\n"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeConfigJSON(t, home, tt.defaultCfg)
+
+			out, err := capacityStatusRunWithDefault(t, t.TempDir(), filepath.Join(home, ".config"), tt.altMachine, tt.altRepoCap, &watch.StateSnapshot{})
+
+			if err != nil {
+				t.Fatalf("dispatch status exited non-zero: %v\n%s", err, out)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("status output lacks %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// A default fleet config that cannot be read makes the capacity line say so (the
+// reason babysit records for the file) and the command still exits 0.
+func TestDispatchStatus_CapacityLine_UnderAnAlternateConfigUnreadableDefault(t *testing.T) {
+	home := t.TempDir()
+	writeConfigJSON(t, home, "{ not json")
+
+	out, err := capacityStatusRunWithDefault(t, t.TempDir(), filepath.Join(home, ".config"), 5, nil, &watch.StateSnapshot{})
+
+	if err != nil {
+		t.Fatalf("dispatch status exited non-zero for an unreadable default config: %v\n%s", err, out)
+	}
+	if want := "capacity: ?/5 slots (capacity limits unreadable: "; !strings.Contains(out, want) {
+		t.Errorf("status output lacks %q:\n%s", want, out)
 	}
 }
 

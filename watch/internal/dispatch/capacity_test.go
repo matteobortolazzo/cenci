@@ -9,10 +9,13 @@ package dispatch
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -92,6 +95,17 @@ type capRepo struct {
 // LoadLimits read one file.
 func capacityConfig(t *testing.T, machine int, repos ...capRepo) Config {
 	t.Helper()
+	cfg, err := LoadConfig(fleetFile(t, machine, repos...))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	return cfg
+}
+
+// fleetFile writes a fleet config.json with the machine cap and the repos (each
+// with an optional repo cap) into a directory of its own and returns its path.
+func fleetFile(t *testing.T, machine int, repos ...capRepo) string {
+	t.Helper()
 	entries := make([]string, 0, len(repos))
 	for _, r := range repos {
 		e := fmt.Sprintf(`{"repo":%q,"dir":"","session":"test-session"`, r.name)
@@ -105,11 +119,7 @@ func capacityConfig(t *testing.T, machine int, repos ...capRepo) Config {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	return cfg
+	return path
 }
 
 type ticketRef struct {
@@ -521,7 +531,7 @@ func TestAdmitUnreadableLedgerAdmitsNothing(t *testing.T) {
 		{
 			name: "an unknown schema version",
 			setup: func(t *testing.T, _, dir string) func() {
-				writeLedger(t, dir, `{"schema":2,"entries":[],"waits":[]}`)
+				writeLedger(t, dir, `{"schema":3,"entries":[],"waits":[]}`)
 				return func() {}
 			},
 			reason: capacity.ErrUnknownSchema,
@@ -904,7 +914,7 @@ func noSettlePause(t *testing.T) {
 func TestSettleRetriesAFailedReleaseOrConfirmOnce(t *testing.T) {
 	failedBeforeWindow := func(run.Opts, run.Controller) error { return errors.New("resolving the agent: nothing configured") }
 	cleanSpawn := func(run.Opts, run.Controller) error { return nil }
-	const staysReserved = "it stays reserved while this process runs"
+	const staysReserved = "it stays reserved until the next pass of this process retries the settle"
 	tests := []struct {
 		name         string
 		spawn        func(run.Opts, run.Controller) error
@@ -933,7 +943,7 @@ func TestSettleRetriesAFailedReleaseOrConfirmOnce(t *testing.T) {
 			ledger: settleLedger{failReleases: 99}, wantEntries: 1, wantState: capacity.StateReserved,
 			wantCalls: func(l *settleLedger) int { return l.releaseCalls }, wantCallsN: 2,
 			wantInLog:    []string{"capacity reservation could not be released", staysReserved, "ledger.json"},
-			wantNotInLog: []string{"an inventory proving no worker frees it"},
+			wantNotInLog: []string{"an inventory proving no worker frees it", "it stays reserved while this process runs"},
 		},
 		{
 			name: "a confirm that keeps failing is retried once, then says exactly what remains", spawn: cleanSpawn,
@@ -1150,5 +1160,679 @@ func TestHelperDispatchProcessesShareOneLedgerThroughTheEnvironment(t *testing.T
 	}
 	if !strings.Contains(outs[1], "skip: concurrency cap reached") {
 		t.Errorf("the second pass did not log `skip: concurrency cap reached`:\n%s", outs[1])
+	}
+}
+
+// -- #1578 item 1: under --config, dispatch admits under the stricter limits ------
+
+// useAdmissionLimits installs the production limits source for one test, with the
+// default fleet config at defaultPath and a counting reader, and returns the paths
+// the reader was asked for, in order.
+func useAdmissionLimits(t *testing.T, defaultPath string) *[]string {
+	t.Helper()
+	prevLimits, prevDefault, prevLoad := capacityLimitsFn, defaultFleetConfigPathFn, loadLimitsFn
+	t.Cleanup(func() { capacityLimitsFn, defaultFleetConfigPathFn, loadLimitsFn = prevLimits, prevDefault, prevLoad })
+	loads := &[]string{}
+	capacityLimitsFn = loadAdmissionLimits
+	defaultFleetConfigPathFn = func() string { return defaultPath }
+	loadLimitsFn = func(path string) (capacity.Limits, error) {
+		*loads = append(*loads, path)
+		return capacity.LoadLimits(path)
+	}
+	return loads
+}
+
+type liveWorker struct {
+	repo   string
+	ticket int
+}
+
+// holdLiveWorkers confirms one ledger entry per worker and makes tmux list each
+// worker's window, so every one counts against the caps.
+func holdLiveWorkers(t *testing.T, l *capacity.Ledger, workers ...liveWorker) {
+	t.Helper()
+	names := make([]string, 0, len(workers))
+	for _, w := range workers {
+		seedHeld(t, l, capacity.KindImplement, w.repo, w.ticket, "")
+		names = append(names, fmt.Sprintf("%d-implement", w.ticket))
+	}
+	useLiveWindows(t, names...)
+}
+
+func loadedConfig(t *testing.T, path string) Config {
+	t.Helper()
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	return cfg
+}
+
+// Each limit binds in both directions: whichever of the default fleet config and
+// the --config file is stricter wins, for the machine cap and per repo.
+func TestAdmitUnderAnAlternateConfigTheStricterLimitWins(t *testing.T) {
+	const reasonMachine, reasonRepo = "concurrency cap reached", "repo concurrency cap reached"
+	tests := []struct {
+		name                   string
+		defMachine, altMachine int
+		defRepos, altRepos     []capRepo
+		live                   []liveWorker
+		repo                   string
+		wantSkip               string
+	}{
+		{name: "default 2, alt 5, two live workers", defMachine: 2, altMachine: 5, live: []liveWorker{{"o/r", 91}, {"o/r", 92}}, repo: "o/r", wantSkip: reasonMachine},
+		{name: "default 3, alt 1, one live worker", defMachine: 3, altMachine: 1, live: []liveWorker{{"o/r", 91}}, repo: "o/r", wantSkip: reasonMachine},
+		{name: "both allow it", defMachine: 3, altMachine: 3, live: []liveWorker{{"o/r", 91}}, repo: "o/r"},
+		{
+			name: "default A=2, alt A=1 is 1", defMachine: 9, altMachine: 9, defRepos: []capRepo{{name: "o/A", cap: intp(2)}}, altRepos: []capRepo{{name: "o/A", cap: intp(1)}},
+			live: []liveWorker{{"o/A", 91}}, repo: "o/A", wantSkip: reasonRepo,
+		},
+		{
+			name: "default B=1 with no cap for B in alt is 1", defMachine: 9, altMachine: 9, defRepos: []capRepo{{name: "o/B", cap: intp(1)}}, altRepos: []capRepo{{name: "o/B"}},
+			live: []liveWorker{{"o/B", 91}}, repo: "o/B", wantSkip: reasonRepo,
+		},
+		{
+			name: "no cap in default with alt C=1 is 1", defMachine: 9, altMachine: 9, defRepos: []capRepo{{name: "o/C"}}, altRepos: []capRepo{{name: "o/C", cap: intp(1)}},
+			live: []liveWorker{{"o/C", 91}}, repo: "o/C", wantSkip: reasonRepo,
+		},
+		{
+			name: "a repo cap of 2 in both lets a second worker in", defMachine: 9, altMachine: 9, defRepos: []capRepo{{name: "o/A", cap: intp(2)}}, altRepos: []capRepo{{name: "o/A", cap: intp(2)}},
+			live: []liveWorker{{"o/A", 91}}, repo: "o/A",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l, _ := useLedger(t)
+			holdLiveWorkers(t, l, tt.live...)
+			useAdmissionLimits(t, fleetFile(t, tt.defMachine, tt.defRepos...))
+			altRepos := tt.altRepos
+			if !slices.ContainsFunc(altRepos, func(r capRepo) bool { return r.name == tt.repo }) {
+				altRepos = append(altRepos, capRepo{name: tt.repo})
+			}
+			cfg := loadedConfig(t, fleetFile(t, tt.altMachine, altRepos...))
+			spawned := recordSpawns(t)
+
+			log := mustRunPass(t, cfg, capacityDeps(ticketRef{repo: tt.repo, number: 1}))
+
+			if tt.wantSkip == "" {
+				assertLaunched(t, spawned, "1")
+				return
+			}
+			assertLaunched(t, spawned)
+			assertSkipped(t, log, tt.repo, 1, tt.wantSkip)
+		})
+	}
+}
+
+// With no default fleet config file, the default machine cap binds beside the
+// alternate file's own: min(alt, 3).
+func TestAdmitUnderAnAlternateConfigWithNoDefaultFileUsesTheDefaultMachineCap(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent", "config.json")
+	for _, tc := range []struct {
+		name       string
+		altMachine int
+		live       int
+		wantSkip   bool
+	}{
+		{"alt above the default cap", 5, capacity.DefaultMachineCap, true},
+		{"alt below the default cap", 1, 1, true},
+		{"alt above the default cap with a slot left", 5, capacity.DefaultMachineCap - 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l, _ := useLedger(t)
+			var workers []liveWorker
+			for i := range tc.live {
+				workers = append(workers, liveWorker{"o/r", 90 + i})
+			}
+			holdLiveWorkers(t, l, workers...)
+			useAdmissionLimits(t, missing)
+			cfg := loadedConfig(t, fleetFile(t, tc.altMachine, capRepo{name: "o/r"}))
+			spawned := recordSpawns(t)
+
+			log := mustRunPass(t, cfg, capacityDeps(ticketRef{repo: "o/r", number: 1}))
+
+			if !tc.wantSkip {
+				assertLaunched(t, spawned, "1")
+				return
+			}
+			assertLaunched(t, spawned)
+			assertSkipped(t, log, "o/r", 1, "concurrency cap reached")
+		})
+	}
+}
+
+// A default fleet config that cannot be read, or holds invalid limits, refuses
+// every admission with the reason babysit records for the same file: the file's own
+// LoadLimits error, unwrapped. An unresolved default path is the same refusal.
+func TestAdmitUnderAnAlternateConfigRefusesWhenTheDefaultLimitsAreUnreadable(t *testing.T) {
+	const prefix = "capacity limits unreadable: "
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	tests := []struct {
+		name    string
+		path    func(t *testing.T) string
+		wantErr string // "" derives it from LoadLimits of the path
+	}{
+		{"not json", func(t *testing.T) string { return write(t, "{ not json") }, ""},
+		{"an invalid repo cap", func(t *testing.T) string {
+			return write(t, `{"dispatch":{"repos":[{"repo":"o/r","concurrencyCap":-1}]}}`)
+		}, ""},
+		{"a path that is not resolved", func(*testing.T) string { return "" }, "the config path is unresolved"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l, _ := useLedger(t)
+			path := tt.path(t)
+			wantErr := tt.wantErr
+			if wantErr == "" {
+				_, err := capacity.LoadLimits(path)
+				if err == nil {
+					t.Fatalf("the fixture %q must make LoadLimits fail", path)
+				}
+				wantErr = err.Error()
+			}
+			useAdmissionLimits(t, path)
+			cfg := loadedConfig(t, fleetFile(t, 5, capRepo{name: "o/r"}))
+			spawned := recordSpawns(t)
+
+			log := mustRunPass(t, cfg, capacityDeps(ticketRef{repo: "o/r", number: 1}, ticketRef{repo: "o/r", number: 2}))
+
+			assertLaunched(t, spawned)
+			assertSkipped(t, log, "o/r", 1, prefix+wantErr)
+			assertSkipped(t, log, "o/r", 2, prefix+wantErr)
+			if got := heldEntries(t, l); len(got) != 0 {
+				t.Errorf("the ledger holds %+v after a refused admission, want nothing", got)
+			}
+		})
+	}
+}
+
+// A --config path that resolves to the default fleet path reads the file once and
+// admits as a run without the flag: the one file's limits, no second read.
+func TestAdmitWithTheDefaultConfigPathReadsTheFileOnce(t *testing.T) {
+	spellings := map[string]func(t *testing.T, path string) string{
+		"the same path": func(_ *testing.T, path string) string { return path },
+		"an unclean spelling": func(_ *testing.T, path string) string {
+			return filepath.Dir(path) + string(filepath.Separator) + "." + string(filepath.Separator) + filepath.Base(path)
+		},
+		"a relative spelling": func(t *testing.T, path string) string {
+			t.Chdir(filepath.Dir(path))
+			return filepath.Base(path)
+		},
+	}
+	for name, spell := range spellings {
+		t.Run(name, func(t *testing.T) {
+			l, _ := useLedger(t)
+			holdLiveWorkers(t, l, liveWorker{"o/r", 91})
+			def := fleetFile(t, 2, capRepo{name: "o/r"})
+			loads := useAdmissionLimits(t, def)
+			cfg := loadedConfig(t, spell(t, def))
+			spawned := recordSpawns(t)
+
+			mustRunPass(t, cfg, capacityDeps(ticketRef{repo: "o/r", number: 1}))
+
+			assertLaunched(t, spawned, "1")
+			if len(*loads) != 1 {
+				t.Errorf("the limits file was read %d times (%q), want once", len(*loads), *loads)
+			}
+		})
+	}
+}
+
+// readConfig follows a symlink, like babysit does: a symlinked default that
+// resolves to a regular file binds, one that resolves to something that is not a
+// regular file refuses admission with the reason babysit records.
+func TestAdmitUnderAnAlternateConfigFollowsASymlinkedDefault(t *testing.T) {
+	t.Run("to a regular file", func(t *testing.T) {
+		l, _ := useLedger(t)
+		holdLiveWorkers(t, l, liveWorker{"o/r", 91})
+		link := filepath.Join(t.TempDir(), "config.json")
+		if err := os.Symlink(fleetFile(t, 1), link); err != nil {
+			t.Fatal(err)
+		}
+		useAdmissionLimits(t, link)
+		cfg := loadedConfig(t, fleetFile(t, 5, capRepo{name: "o/r"}))
+		spawned := recordSpawns(t)
+
+		log := mustRunPass(t, cfg, capacityDeps(ticketRef{repo: "o/r", number: 1}))
+
+		assertLaunched(t, spawned)
+		assertSkipped(t, log, "o/r", 1, "concurrency cap reached")
+	})
+	for _, tc := range []struct {
+		name   string
+		target func(t *testing.T) string
+	}{
+		{"to a directory", func(t *testing.T) string { return t.TempDir() }},
+		{"to a FIFO", func(t *testing.T) string {
+			fifo := filepath.Join(t.TempDir(), "fifo")
+			if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return fifo
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l, _ := useLedger(t)
+			link := filepath.Join(t.TempDir(), "config.json")
+			if err := os.Symlink(tc.target(t), link); err != nil {
+				t.Fatal(err)
+			}
+			_, err := capacity.LoadLimits(link)
+			if err == nil {
+				t.Fatal("the fixture must make LoadLimits fail")
+			}
+			useAdmissionLimits(t, link)
+			cfg := loadedConfig(t, fleetFile(t, 5, capRepo{name: "o/r"}))
+			spawned := recordSpawns(t)
+
+			log := mustRunPass(t, cfg, capacityDeps(ticketRef{repo: "o/r", number: 1}))
+
+			assertLaunched(t, spawned)
+			assertSkipped(t, log, "o/r", 1, "capacity limits unreadable: "+err.Error())
+			if got := heldEntries(t, l); len(got) != 0 {
+				t.Errorf("the ledger holds %+v, want nothing", got)
+			}
+		})
+	}
+}
+
+// A pause (a machine cap of 0) in either file admits nothing: the pause wins.
+func TestAdmitUnderAnAlternateConfigAPauseWins(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		defMachine, altCap int
+	}{{"alt paused, default 3", 3, 0}, {"default paused, alt 3", 0, 3}} {
+		t.Run(tc.name, func(t *testing.T) {
+			useLedger(t)
+			useAdmissionLimits(t, fleetFile(t, tc.defMachine))
+			cfg := loadedConfig(t, fleetFile(t, tc.altCap, capRepo{name: "o/r"}))
+			spawned := recordSpawns(t)
+
+			log := mustRunPass(t, cfg, capacityDeps(ticketRef{repo: "o/r", number: 1}))
+
+			assertLaunched(t, spawned)
+			assertSkipped(t, log, "o/r", 1, "concurrency cap reached")
+		})
+	}
+}
+
+// A repo cap above the effective (stricter) machine cap is clamped to it: with the
+// default at 2, a repo capped at 5 in the alternate file still gets 2 workers.
+func TestAdmitUnderAnAlternateConfigClampsARepoCapToTheEffectiveMachineCap(t *testing.T) {
+	useLedger(t)
+	useAdmissionLimits(t, fleetFile(t, 2))
+	cfg := loadedConfig(t, fleetFile(t, 5, capRepo{name: "o/A", cap: intp(5)}))
+	spawned := recordSpawns(t)
+
+	log := mustRunPass(t, cfg, capacityDeps(ticketRef{repo: "o/A", number: 1}, ticketRef{repo: "o/A", number: 2}, ticketRef{repo: "o/A", number: 3}))
+
+	assertLaunched(t, spawned, "1", "2")
+	assertSkipped(t, log, "o/A", 3, "concurrency cap reached")
+}
+
+// `cenci dispatch status --config <alt>` shows the effective machine cap and, for
+// each repo this config lists, the effective repo cap. A repo capped only in the
+// default file is not listed: this process cannot launch it.
+func TestReadCapacityStatusShowsTheEffectiveLimitsUnderAnAlternateConfig(t *testing.T) {
+	useLedger(t)
+	useAdmissionLimits(t, fleetFile(t, 2,
+		capRepo{name: "o/A", cap: intp(1)}, capRepo{name: "o/B", cap: intp(4)}, capRepo{name: "o/E", cap: intp(1)}))
+	cfg := loadedConfig(t, fleetFile(t, 5,
+		capRepo{name: "o/A", cap: intp(3)}, capRepo{name: "o/B"}, capRepo{name: "o/C"}, capRepo{name: "o/D", cap: intp(9)}))
+
+	st := ReadCapacityStatus(cfg)
+
+	if st.Total != 2 {
+		t.Errorf("total = %d, want the effective machine cap 2", st.Total)
+	}
+	got := map[string]int{}
+	var order []string
+	for _, r := range st.Repos {
+		got[r.Repo] = r.Cap
+		order = append(order, r.Repo)
+	}
+	want := map[string]int{"o/A": 1, "o/B": 2, "o/D": 2}
+	if len(got) != len(want) || strings.Join(order, ",") != "o/A,o/B,o/D" {
+		t.Fatalf("repos listed = %v, want %v in config order (a repo capped only in the default file is not listed)", order, want)
+	}
+	for repo, c := range want {
+		if got[repo] != c {
+			t.Errorf("%s cap = %d, want %d", repo, got[repo], c)
+		}
+	}
+}
+
+// -- #1578 item 2: a dispatch pass heals its own failed settles ------------------
+
+const (
+	healedReleaseLine = "dispatch: capacity: released the implement reservation left reserved by an earlier failed settle; no worker window exists"
+	healedConfirmLine = "dispatch: capacity: confirmed the implement reservation left reserved by an earlier failed settle; its worker window is running"
+)
+
+// leaveReserved runs one pass whose launch of ticket number settles badly twice,
+// so the ledger keeps a `reserved` entry launched by this process (the state a
+// failed Release or Confirm leaves behind), and returns that pass's log. confirm
+// false: the launch failed before any window and its Release fails. confirm true:
+// the spawn succeeded and its Confirm fails.
+func leaveReserved(t *testing.T, base *capacity.Ledger, cfg Config, number int, confirm bool) string {
+	t.Helper()
+	noSettlePause(t)
+	wrapped := &settleLedger{Ledger: base}
+	if confirm {
+		wrapped.failConfirms, wrapped.confirmErr = 99, capacity.ErrIO
+		stubRunFn(t, func(run.Opts, run.Controller) error { return nil })
+	} else {
+		wrapped.failReleases = 99
+		stubRunFn(t, func(run.Opts, run.Controller) error { return errors.New("resolving the agent: nothing configured") })
+	}
+	setLedgerSeam(t, func() capacityLedger { return wrapped })
+	log, _ := runPass(t, cfg, capacityDeps(ticketRef{repo: "o/r", number: number}), fakeController{})
+	setLedgerSeam(t, func() capacityLedger { return base })
+	entries := heldEntries(t, base)
+	if len(entries) != 1 || entries[0].State != capacity.StateReserved || entries[0].Ticket != number {
+		t.Fatalf("the failed settle left %+v, want one reserved entry for #%d\nlog:\n%s", entries, number, log)
+	}
+	return log
+}
+
+// countInventoryReads makes every socket's inventory a complete, empty one (no
+// tmux server) and counts the reads.
+func countInventoryReads(t *testing.T) *int {
+	t.Helper()
+	reads := new(int)
+	useInventoryFn(t, func(string) (tmux.CleanupInventory, error) {
+		*reads++
+		return tmux.CleanupInventory{}, tmux.ErrNoServer
+	})
+	return reads
+}
+
+func useClock(t *testing.T, now func() time.Time) {
+	t.Helper()
+	prev := capacityClock
+	capacityClock = now
+	t.Cleanup(func() { capacityClock = prev })
+}
+
+// A Release that failed twice leaves a reserved entry of this process, which no
+// inventory frees while the process lives. The next pass removes it before its
+// first Admit, so the freed slot is usable at once: with cap 1, the next ticket
+// launches. A tmux server that is not running is a complete, empty inventory.
+func TestSelfHealReleasesAReservationLeftByAFailedRelease(t *testing.T) {
+	base, _ := useLedger(t)
+	cfg := capacityConfig(t, 1, capRepo{name: "o/r"})
+	leaveReserved(t, base, cfg, 42, false)
+	useInventoryFn(t, func(string) (tmux.CleanupInventory, error) { return tmux.CleanupInventory{}, tmux.ErrNoServer })
+	spawned := recordSpawns(t)
+
+	log := mustRunPass(t, cfg, capacityDeps(ticketRef{repo: "o/r", number: 43}))
+
+	if !hasLine(log, healedReleaseLine) {
+		t.Errorf("log has no %q:\n%s", healedReleaseLine, log)
+	}
+	assertLaunched(t, spawned, "43")
+	entries := heldEntries(t, base)
+	if len(entries) != 1 || entries[0].Ticket != 43 {
+		t.Errorf("the ledger holds %+v, want only the new launch #43", entries)
+	}
+}
+
+// A Confirm that failed twice leaves a reserved entry whose worker window exists:
+// the next pass confirms it, and the slot stays held by the live worker.
+func TestSelfHealConfirmsAReservationLeftByAFailedConfirmWhoseWindowIsRunning(t *testing.T) {
+	base, _ := useLedger(t)
+	cfg := capacityConfig(t, 3, capRepo{name: "o/r"})
+	leaveReserved(t, base, cfg, 42, true)
+	useLiveWindows(t, "42-implement")
+
+	log := mustRunPass(t, cfg, capacityDeps())
+
+	if !hasLine(log, healedConfirmLine) {
+		t.Errorf("log has no %q:\n%s", healedConfirmLine, log)
+	}
+	entries := heldEntries(t, base)
+	if len(entries) != 1 || entries[0].Ticket != 42 || entries[0].State != capacity.StateConfirmed {
+		t.Errorf("the ledger holds %+v, want #42 confirmed", entries)
+	}
+}
+
+// An inventory that cannot prove the worker gone leaves the entry reserved and
+// logs nothing as released: a tmux read that failed, a listing that dropped a row,
+// a listing read before the entry last changed.
+func TestSelfHealKeepsAReservationTheInventoryCannotJudge(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{"a tmux read that failed", func(t *testing.T) {
+			useInventoryFn(t, func(string) (tmux.CleanupInventory, error) { return tmux.CleanupInventory{}, errors.New("tmux: timed out") })
+		}},
+		{"a listing that dropped a row", func(t *testing.T) {
+			useInventoryFn(t, func(string) (tmux.CleanupInventory, error) {
+				return tmux.CleanupInventory{Dropped: []string{"malformed row"}}, nil
+			})
+		}},
+		{"a listing read before the entry last changed", func(t *testing.T) {
+			countInventoryReads(t)
+			useClock(t, func() time.Time { return time.Now().Add(-time.Hour) })
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base, _ := useLedger(t)
+			cfg := capacityConfig(t, 3, capRepo{name: "o/r"})
+			leaveReserved(t, base, cfg, 42, false)
+			tt.setup(t)
+
+			log := mustRunPass(t, cfg, capacityDeps())
+
+			for _, bad := range []string{"released the", "confirmed the"} {
+				if strings.Contains(log, bad) {
+					t.Errorf("log says %q although the inventory proved nothing:\n%s", bad, log)
+				}
+			}
+			if entries := heldEntries(t, base); len(entries) != 1 || entries[0].State != capacity.StateReserved {
+				t.Errorf("the ledger holds %+v, want the one entry still reserved", entries)
+			}
+		})
+	}
+}
+
+// A reserved entry whose launcher is another live process, and every babysit-kind
+// entry, is never settled by the self-heal, and neither costs an inventory read. A
+// confirmed entry of this process is not the self-heal's either.
+func TestSelfHealNeverTouchesForeignOrBabysitEntriesAndReadsNothingForThem(t *testing.T) {
+	base, _ := useLedger(t)
+	sleeper := exec.Command("sleep", "60")
+	if err := sleeper.Start(); err != nil {
+		t.Fatalf("starting the foreign launcher: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sleeper.Process.Kill()
+		_ = sleeper.Wait()
+	})
+	limits := capacity.Limits{Machine: 99}
+	foreign, err := base.Admit(capacity.Request{Kind: capacity.KindImplement, Repo: "o/r", Ticket: 7, Window: "7-implement", Launcher: sleeper.Process.Pid, Limits: limits})
+	if err != nil || !foreign.Admitted {
+		t.Fatalf("seeding the foreign entry: %+v, %v", foreign, err)
+	}
+	repair, err := base.Admit(capacity.Request{Kind: capacity.KindCIRepair, Repo: "o/r", Ticket: 8, Window: "8-ci-repair", Limits: limits})
+	if err != nil || !repair.Admitted {
+		t.Fatalf("seeding the babysit entry: %+v, %v", repair, err)
+	}
+	seedHeld(t, base, capacity.KindImplement, "o/r", 9, "")
+	before := heldEntries(t, base)
+	reads := countInventoryReads(t)
+	cfg := capacityConfig(t, 99, capRepo{name: "o/r"})
+
+	log := mustRunPass(t, cfg, capacityDeps())
+
+	if *reads != 0 {
+		t.Errorf("the self-heal read %d tmux inventories with no reserved dispatch entry of this process, want 0", *reads)
+	}
+	for _, bad := range []string{"released the", "confirmed the"} {
+		if strings.Contains(log, bad) {
+			t.Errorf("log says %q:\n%s", bad, log)
+		}
+	}
+	after := heldEntries(t, base)
+	if len(after) != len(before) {
+		t.Fatalf("the ledger holds %+v, want the three seeded entries unchanged (%+v)", after, before)
+	}
+	for i := range before {
+		if after[i] != before[i] {
+			t.Errorf("entry %d changed: %+v, want %+v", i, after[i], before[i])
+		}
+	}
+}
+
+// The self-heal runs at the start of every real pass, whichever entry point the
+// pass comes through: `cenci dispatch --once` (RunOnce), `cenci dispatch loop`
+// (dispatchTick, one tick of RunLoop) and the daemon's combined loop
+// (combinedTick, one pass of runCombinedLoop). Each leaves a reserved entry of
+// this process behind, then drives the real entry point over a real-git, fake-gh
+// fixture with cap 1: the stale entry is gone from the ledger file, the heal line
+// is logged, and the next ticket launches into the freed slot, which it can only
+// do when the heal ran before that pass's first Admit.
+func TestSelfHealRunsAtTheStartOfEveryRealPassEntryPoint(t *testing.T) {
+	entryPoints := []struct {
+		name string
+		pass func(t *testing.T, configPath string, out *bytes.Buffer)
+	}{
+		{"RunOnce", func(t *testing.T, configPath string, out *bytes.Buffer) {
+			cfg, err := LoadConfig(configPath)
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, out); err != nil {
+				t.Fatalf("RunOnce: %v\n%s", err, out.String())
+			}
+		}},
+		{"dispatchTick", func(t *testing.T, configPath string, out *bytes.Buffer) {
+			if err := dispatchTick(configPath, fakeController{}, &fakeMutator{}, out, ""); err != nil {
+				t.Fatalf("dispatchTick: %v\n%s", err, out.String())
+			}
+		}},
+		{"combinedTick", func(t *testing.T, configPath string, out *bytes.Buffer) {
+			attention := make(chan watch.AttentionUpdate, 2)
+			state := watch.DispatchState{DaemonRunning: true}
+			var windows []watch.WindowState
+			var headroom map[string]float64
+			combinedTick(context.Background(), configPath, fakeController{}, &fakeMutator{}, out, &memStore{}, attention, &state, &windows, &headroom)
+		}},
+	}
+	for _, ep := range entryPoints {
+		t.Run(ep.name, func(t *testing.T) {
+			base, _ := useLedger(t)
+			loop := newFilterLoop(t, watch.StateSnapshot{}, filterPassIssue{number: 43})
+			body := fmt.Sprintf(`{"dispatch":{"loopEnabled":true,"concurrencyCap":1,"repos":[{"repo":"o/r","dir":%q,"session":"test-session"}]}}`, loop.dir)
+			writeFile(t, loop.path, body)
+			leaveReserved(t, base, capacityConfig(t, 1, capRepo{name: "o/r"}), 42, false)
+			useLiveWindows(t, "43-implement")
+			spawned := recordSpawns(t)
+			var buf bytes.Buffer
+
+			ep.pass(t, loop.path, &buf)
+
+			if !hasLine(buf.String(), healedReleaseLine) {
+				t.Errorf("log has no %q:\n%s", healedReleaseLine, buf.String())
+			}
+			assertLaunched(t, spawned, "43")
+			entries := heldEntries(t, base)
+			if len(entries) != 1 || entries[0].Ticket != 43 {
+				t.Errorf("the ledger holds %+v, want only the new launch #43 (the stale #42 reservation healed)\nlog:\n%s", entries, buf.String())
+			}
+		})
+	}
+}
+
+// A dry run makes no ledger write and reads no inventory: the reserved entry stays
+// exactly as the file holds it.
+func TestSelfHealDoesNotRunOnADryRun(t *testing.T) {
+	base, _ := useLedger(t)
+	cfg := capacityConfig(t, 3, capRepo{name: "o/r"})
+	leaveReserved(t, base, cfg, 42, false)
+	reads := countInventoryReads(t)
+	before, err := os.ReadFile(base.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := applyDispatch(cfg, capacityDeps(), fakeController{}, &fakeMutator{}, true, &buf); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+
+	if *reads != 0 {
+		t.Errorf("a dry run read %d tmux inventories, want 0", *reads)
+	}
+	if after, _ := os.ReadFile(base.Path()); string(after) != string(before) {
+		t.Errorf("a dry run rewrote the ledger:\n%s", after)
+	}
+}
+
+// A pass in this process that has reserved a slot and is still launching holds an
+// entry that looks exactly like a failed settle. A concurrent pass in the same
+// process must not settle it: here the second pass would release the slot of a
+// launch that is about to be confirmed.
+func TestSelfHealSkipsAReservationAnotherPassOfThisProcessIsStillSettling(t *testing.T) {
+	base, _ := useLedger(t)
+	reads := countInventoryReads(t)
+	cfg := capacityConfig(t, 3, capRepo{name: "o/r"})
+	started, proceed := make(chan struct{}), make(chan struct{})
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		close(started)
+		<-proceed
+		return nil
+	})
+	var launching bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		_, err := applyDispatch(cfg, capacityDeps(ticketRef{repo: "o/r", number: 42}), fakeController{}, &fakeMutator{}, false, &launching)
+		done <- err
+	}()
+	<-started
+
+	log := mustRunPass(t, cfg, capacityDeps())
+	close(proceed)
+	if err := <-done; err != nil {
+		t.Fatalf("the launching pass: %v\n%s", err, launching.String())
+	}
+
+	if strings.Contains(log, "released the") || *reads != 0 {
+		t.Errorf("the concurrent pass settled a reservation that is still in flight (%d reads):\n%s", *reads, log)
+	}
+	entries := heldEntries(t, base)
+	if len(entries) != 1 || entries[0].Ticket != 42 || entries[0].State != capacity.StateConfirmed {
+		t.Errorf("the ledger holds %+v, want #42 confirmed by the pass that launched it\nlog:\n%s", entries, launching.String())
+	}
+	if strings.Contains(launching.String(), "missing from the ledger") {
+		t.Errorf("the launching pass lost its reservation:\n%s", launching.String())
+	}
+}
+
+// The log of a settle that failed says the next pass of this process retries it.
+func TestAFailedSettleSaysTheNextPassRetriesIt(t *testing.T) {
+	for _, confirm := range []bool{false, true} {
+		t.Run(fmt.Sprintf("confirm=%v", confirm), func(t *testing.T) {
+			base, _ := useLedger(t)
+			cfg := capacityConfig(t, 3, capRepo{name: "o/r"})
+
+			log := leaveReserved(t, base, cfg, 42, confirm)
+
+			if want := "the next pass of this process retries the settle"; !strings.Contains(log, want) {
+				t.Errorf("log has no %q:\n%s", want, log)
+			}
+			if strings.Contains(log, "while this process runs") {
+				t.Errorf("log still says the entry stays reserved while this process runs:\n%s", log)
+			}
+		})
 	}
 }

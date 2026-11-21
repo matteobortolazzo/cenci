@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,7 @@ type testEnv struct {
 	mu       sync.Mutex
 	now      time.Time
 	procs    map[int]string // pid -> start time, for live processes
+	pid      int            // the process the ledger believes is calling
 	machine  int
 	repoCaps map[string]int
 }
@@ -41,6 +43,7 @@ func newEnv(t *testing.T) *testEnv {
 		dir:      trustedDir(t),
 		now:      time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC),
 		procs:    map[int]string{testLauncher: launcherBoot},
+		pid:      testLauncher,
 		machine:  3,
 		repoCaps: map[string]int{},
 	}
@@ -49,7 +52,30 @@ func newEnv(t *testing.T) *testEnv {
 }
 
 func (e *testEnv) newLedger(lockTimeout time.Duration) *Ledger {
-	return NewLedger(e.dir, Options{Now: e.clock, Probe: e.probe, LockTimeout: lockTimeout})
+	return NewLedger(e.dir, Options{Now: e.clock, Probe: e.probe, PID: e.callerPid, LockTimeout: lockTimeout})
+}
+
+// callerPid is the process the ledger sees as the caller of Wait and Restore.
+func (e *testEnv) callerPid() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.pid
+}
+
+// as runs fn with the ledger's caller switched to pid, then switches it back, so
+// a test can play two supervisors against one ledger.
+func (e *testEnv) as(pid int, fn func()) {
+	e.t.Helper()
+	e.mu.Lock()
+	prev := e.pid
+	e.pid = pid
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.pid = prev
+		e.mu.Unlock()
+	}()
+	fn()
 }
 
 func (e *testEnv) clock() time.Time {
@@ -732,6 +758,301 @@ func TestSnapshotLiveWaitsIgnoresExpiredRecords(t *testing.T) {
 	}
 }
 
+// ---- wait ownership (schema 2) ----------------------------------------------
+
+const (
+	// waitV1 is a schema 1 wait: seven keys, no owner. It was recorded at 09:00,
+	// the test clock's start, and expires at 09:03.
+	waitV1 = `{"repo":"o/a","ticket":90,"kind":"ci-repair","reason":"concurrency cap reached","since":"2026-11-20T08:59:00Z","refreshedAt":"2026-11-20T09:00:00Z","expiresAt":"2026-11-20T09:03:00Z"}`
+	// entryV1 is a confirmed ci-repair entry, valid under both schemas.
+	entryV1 = `{"holderId":"h","kind":"ci-repair","repo":"o/b","ticket":5,"branch":"b","launcherPid":7,"launcherStart":"12","socket":"s","window":"5-ci-repair","dir":"/d","launchId":"L","state":"confirmed","createdAt":"2026-11-20T09:00:00Z","updatedAt":"2026-11-20T09:00:01Z"}`
+)
+
+// waitV2 is the same wait with an owner: pid and start are raw JSON values.
+func waitV2(pid, start string) string {
+	return strings.Replace(waitV1, `"expiresAt":"2026-11-20T09:03:00Z"`, `"expiresAt":"2026-11-20T09:03:00Z","ownerPid":`+pid+`,"ownerStart":`+start, 1)
+}
+
+func schemaOne(waits string) string { return `{"schema":1,"entries":[],"waits":[` + waits + `]}` }
+func schemaTwo(waits string) string { return `{"schema":2,"entries":[],"waits":[` + waits + `]}` }
+
+// waitAs records a wait while the ledger sees pid as its caller.
+func (e *testEnv) waitAs(pid int, kind Kind, repo string, ticket int) {
+	e.t.Helper()
+	e.as(pid, func() { e.wait(kind, repo, ticket, "concurrency cap reached") })
+}
+
+// supervisor is a live process other than the dispatch caller: it owns waits.
+func (e *testEnv) supervisor(pid int, start string) int {
+	e.setProc(pid, start)
+	return pid
+}
+
+func TestWaitRecordsTheCallingProcessAsItsOwner(t *testing.T) {
+	e := newEnv(t)
+	e.wait(KindCIRepair, "o/a", 90, "concurrency cap reached")
+	w := e.snapshot().Waits[0]
+	if w.OwnerPID != testLauncher || w.OwnerStart != launcherBoot {
+		t.Fatalf("owner = %d/%q, want the caller %d/%q", w.OwnerPID, w.OwnerStart, testLauncher, launcherBoot)
+	}
+}
+
+func TestWaitRefreshByADifferentLiveProcessTakesOverOwnership(t *testing.T) {
+	e := newEnv(t)
+	first := e.supervisor(6001, "50")
+	second := e.supervisor(6002, "60")
+	e.waitAs(first, KindCIRepair, "o/a", 90)
+	since := e.snapshot().Waits[0].Since
+	e.advance(5 * time.Second)
+
+	e.waitAs(second, KindCIRepair, "o/a", 90)
+
+	waits := e.snapshot().Waits
+	if len(waits) != 1 {
+		t.Fatalf("waits = %+v, want one record per PR", waits)
+	}
+	if w := waits[0]; w.OwnerPID != second || w.OwnerStart != "60" || !w.Since.Equal(since) {
+		t.Fatalf("wait = %+v, want owner %d/60 and the first Since %s", w, second, since)
+	}
+	// The first supervisor's death no longer matters: the wait is the second's.
+	e.killProc(first)
+	e.machine = 2
+	e.mustAdmit(e.req(KindImplement, "o/a", 1))
+	e.mustRefuse(e.req(KindImplement, "o/b", 2), ReasonMachineCap)
+}
+
+// The three operations that already drop an expired wait also drop one whose
+// owner is gone, so a SIGKILLed supervisor does not hold a slot free for 3 poll
+// intervals.
+func TestWaitWhoseOwnerIsDeadIsDroppedByAdmitAndTheSlotIsUsable(t *testing.T) {
+	e := newEnv(t)
+	e.machine = 2
+	e.mustAdmit(e.req(KindImplement, "o/a", 1)) // one slot left
+	owner := e.supervisor(6001, "50")
+	e.waitAs(owner, KindCIRepair, "o/a", 90)
+	e.mustRefuse(e.req(KindImplement, "o/b", 2), ReasonMachineCap) // the live wait keeps the last slot free
+
+	e.killProc(owner)
+
+	e.mustAdmit(e.req(KindImplement, "o/b", 2))
+	if got := e.snapshot().Waits; len(got) != 0 {
+		t.Fatalf("waits = %+v, want the dead owner's wait removed by Admit", got)
+	}
+}
+
+func TestWaitWhoseOwnerIsDeadIsDroppedByReconcile(t *testing.T) {
+	e := newEnv(t)
+	owner := e.supervisor(6001, "50")
+	e.waitAs(owner, KindCIRepair, "o/a", 90)
+	e.killProc(owner)
+
+	e.reconcile(e.inv())
+
+	if got := e.snapshot().Waits; len(got) != 0 {
+		t.Fatalf("waits = %+v, want the dead owner's wait removed by Reconcile", got)
+	}
+}
+
+func TestWaitWhoseOwnerIsDeadIsDroppedByAnotherWait(t *testing.T) {
+	e := newEnv(t)
+	owner := e.supervisor(6001, "50")
+	e.waitAs(owner, KindCIRepair, "o/a", 90)
+	e.killProc(owner)
+
+	e.wait(KindMergeRepair, "o/b", 91, "concurrency cap reached")
+
+	waits := e.snapshot().Waits
+	if len(waits) != 1 || waits[0].Ticket != 91 {
+		t.Fatalf("waits = %+v, want only the live caller's wait #91", waits)
+	}
+}
+
+func TestWaitWhoseOwnerPIDWasReusedIsDropped(t *testing.T) {
+	e := newEnv(t)
+	e.machine = 2
+	e.mustAdmit(e.req(KindImplement, "o/a", 1))
+	owner := e.supervisor(6001, "50")
+	e.waitAs(owner, KindCIRepair, "o/a", 90)
+	e.setProc(owner, "999999") // the same pid, another process: a different start time
+
+	e.mustAdmit(e.req(KindImplement, "o/b", 2))
+	if got := e.snapshot().Waits; len(got) != 0 {
+		t.Fatalf("waits = %+v, want the wait of a reused pid removed", got)
+	}
+}
+
+func TestWaitOwnerWithoutAStartTimeIsDroppedOnlyWhenItsPIDIsNotAlive(t *testing.T) {
+	e := newEnv(t)
+	e.machine = 2
+	e.mustAdmit(e.req(KindImplement, "o/a", 1))
+	owner := e.supervisor(6001, "") // a platform with no start time
+	e.waitAs(owner, KindCIRepair, "o/a", 90)
+	if w := e.snapshot().Waits[0]; w.OwnerPID != owner || w.OwnerStart != "" {
+		t.Fatalf("wait owner = %d/%q, want %d with an empty start", w.OwnerPID, w.OwnerStart, owner)
+	}
+
+	// The pid is alive, and a start time that appeared later is no disagreement.
+	e.setProc(owner, "70")
+	e.mustRefuse(e.req(KindImplement, "o/b", 2), ReasonMachineCap)
+	if len(e.snapshot().Waits) != 1 {
+		t.Fatal("a live owner's wait was dropped")
+	}
+
+	e.killProc(owner)
+	e.mustAdmit(e.req(KindImplement, "o/b", 2))
+	if got := e.snapshot().Waits; len(got) != 0 {
+		t.Fatalf("waits = %+v, want the wait of a pid that is gone removed", got)
+	}
+}
+
+// The #1469 priority rule, unchanged: a wait whose owner is alive makes dispatch
+// need more free slots than live waits until the wait expires.
+func TestWaitWhoseOwnerIsAliveKeepsThePriorityRuleUntilItExpires(t *testing.T) {
+	e := newEnv(t)
+	e.machine = 2
+	e.mustAdmit(e.req(KindImplement, "o/a", 1))
+	owner := e.supervisor(6001, "50")
+	e.waitAs(owner, KindCIRepair, "o/a", 90)
+
+	e.advance(29 * time.Second)
+	e.mustRefuse(e.req(KindImplement, "o/b", 2), ReasonMachineCap)
+	e.advance(2 * time.Second) // past the 3 x 10s expiry
+	e.mustAdmit(e.req(KindImplement, "o/b", 2))
+}
+
+func TestSchemaOneWaitIsKeptWithTimeOnlyExpiryWhateverTheProcessesDo(t *testing.T) {
+	e := newEnv(t)
+	e.machine = 1
+	e.writeLedger(schemaOne(waitV1))
+	e.killProc(testLauncher) // no process of any pid is alive
+
+	e.mustRefuse(e.req(KindImplement, "o/b", 2), ReasonMachineCap) // the wait still keeps the only slot free
+	waits := e.snapshot().Waits
+	if len(waits) != 1 || waits[0].OwnerPID != 0 || waits[0].OwnerStart != "" {
+		t.Fatalf("waits = %+v, want the schema 1 wait kept with ownerPid 0", waits)
+	}
+	e.reconcile(e.inv())
+	if len(e.snapshot().Waits) != 1 {
+		t.Fatal("Reconcile dropped a schema 1 wait before its expiresAt")
+	}
+
+	e.advance(3*time.Minute + time.Second) // past 09:03
+	e.setProc(testLauncher, launcherBoot)
+	e.mustAdmit(e.req(KindImplement, "o/b", 2))
+	if got := e.snapshot().Waits; len(got) != 0 {
+		t.Fatalf("waits = %+v, want the schema 1 wait removed at its expiresAt", got)
+	}
+}
+
+func TestSchemaOneWaitIsRemovedByDropWait(t *testing.T) {
+	e := newEnv(t)
+	e.writeLedger(schemaOne(waitV1))
+	if err := e.ledger.DropWait("o/a", 90); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.snapshot().Waits; len(got) != 0 {
+		t.Fatalf("waits = %+v, want the schema 1 wait dropped", got)
+	}
+}
+
+// Confirm, Release and DropWait are not wait sweeps: a dead owner's record stays
+// until Admit, Reconcile or Wait runs, or it expires.
+func TestConfirmAndReleaseLeaveADeadOwnersWaitAlone(t *testing.T) {
+	e := newEnv(t)
+	owner := e.supervisor(6001, "50")
+	e.waitAs(owner, KindCIRepair, "o/a", 90)
+	held := e.mustAdmit(e.req(KindImplement, "o/b", 1))
+	other := e.mustAdmit(e.req(KindImplement, "o/c", 2))
+	e.killProc(owner)
+
+	e.confirm(held)
+	if err := e.ledger.Release(other); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := e.snapshot().Waits; len(got) != 1 {
+		t.Fatalf("waits = %+v, want the wait untouched by Confirm and Release", got)
+	}
+}
+
+func TestNewLedgerWritesSchemaTwoWithTheTwoOwnerWaitKeys(t *testing.T) {
+	e := newEnv(t)
+	e.mustAdmit(e.req(KindImplement, "o/a", 1))
+	e.wait(KindCIRepair, "o/a", 90, "concurrency cap reached")
+
+	var file struct {
+		Schema  int                          `json:"schema"`
+		Entries []map[string]json.RawMessage `json:"entries"`
+		Waits   []map[string]json.RawMessage `json:"waits"`
+	}
+	if err := json.Unmarshal([]byte(e.readLedger()), &file); err != nil {
+		t.Fatal(err)
+	}
+	if file.Schema != 2 {
+		t.Errorf("schema = %d, want 2", file.Schema)
+	}
+	wantWait := []string{"repo", "ticket", "kind", "reason", "since", "refreshedAt", "expiresAt", "ownerPid", "ownerStart"}
+	if len(file.Waits) != 1 || len(file.Waits[0]) != len(wantWait) {
+		t.Fatalf("waits = %v, want one wait with exactly the keys %v", file.Waits, wantWait)
+	}
+	for _, k := range wantWait {
+		if _, ok := file.Waits[0][k]; !ok {
+			t.Errorf("wait has no %q key", k)
+		}
+	}
+	if string(file.Waits[0]["ownerPid"]) != strconv.Itoa(testLauncher) || string(file.Waits[0]["ownerStart"]) != `"`+launcherBoot+`"` {
+		t.Errorf("owner keys = %s/%s, want %d/%q", file.Waits[0]["ownerPid"], file.Waits[0]["ownerStart"], testLauncher, launcherBoot)
+	}
+	// Schema 2 grows only the wait: an entry keeps its fourteen keys.
+	if len(file.Entries) != 1 || len(file.Entries[0]) != 14 {
+		t.Errorf("entries = %v, want one entry with its 14 keys", file.Entries)
+	}
+}
+
+func TestSchemaOneLedgerIsReadAsIsAndUpgradedByTheNextWrite(t *testing.T) {
+	e := newEnv(t)
+	original := `{"schema":1,"entries":[` + entryV1 + `],"waits":[` + waitV1 + `]}`
+	path := e.writeLedger(original)
+
+	snap := e.snapshot()
+	if len(snap.Entries) != 1 || snap.Entries[0].HolderID != "h" || snap.Entries[0].LauncherPID != 7 || snap.Entries[0].LauncherStart != "12" ||
+		snap.Entries[0].State != StateConfirmed || snap.Entries[0].Window != "5-ci-repair" || snap.Entries[0].LaunchID != "L" {
+		t.Fatalf("entries = %+v, want the schema 1 entry read unchanged", snap.Entries)
+	}
+	if len(snap.Waits) != 1 || snap.Waits[0].OwnerPID != 0 || snap.Waits[0].OwnerStart != "" || snap.Waits[0].Reason != "concurrency cap reached" {
+		t.Fatalf("waits = %+v, want the schema 1 wait read with no owner", snap.Waits)
+	}
+	if data, _ := os.ReadFile(path); string(data) != original {
+		t.Fatalf("a read rewrote the schema 1 file: %s", data)
+	}
+
+	e.mustAdmit(e.req(KindImplement, "o/c", 1)) // the next write
+
+	upgraded := e.readLedger()
+	if !strings.HasPrefix(upgraded, `{"schema":2,`) {
+		t.Fatalf("ledger after the write = %s, want schema 2", upgraded)
+	}
+	after := e.snapshot()
+	if len(after.Entries) != 2 || after.Entries[0] != snap.Entries[0] {
+		t.Fatalf("entries = %+v, want the schema 1 entry kept unchanged beside the new one", after.Entries)
+	}
+	if len(after.Waits) != 1 || after.Waits[0] != snap.Waits[0] {
+		t.Fatalf("waits = %+v, want the schema 1 wait kept (ownerPid 0)", after.Waits)
+	}
+	if !strings.Contains(upgraded, `"ownerPid":0,"ownerStart":""`) {
+		t.Fatalf("ledger = %s, want the upgraded wait to carry ownerPid 0 and an empty ownerStart", upgraded)
+	}
+}
+
+func TestSchemaTwoLedgerWithAnOwnedWaitReadsBack(t *testing.T) {
+	e := newEnv(t)
+	e.writeLedger(schemaTwo(waitV2("4242", `"100"`)))
+	w := e.snapshot().Waits
+	if len(w) != 1 || w[0].OwnerPID != 4242 || w[0].OwnerStart != "100" {
+		t.Fatalf("waits = %+v, want the owner read back", w)
+	}
+}
+
 // ---- release rules ---------------------------------------------------------
 
 func TestReservedEntryWithLiveLauncherIsKeptEvenWhenNoWindowExists(t *testing.T) {
@@ -1003,6 +1324,209 @@ func TestAdoptionDoesNotNeedAFreeSlot(t *testing.T) {
 	}
 }
 
+// ---- restoring an adopted entry ---------------------------------------------
+
+const adopter = 5151
+
+// adopt has a supervisor that died after Admit replaced by a restarted one
+// (adopter, start time 777), and returns the adopter's permit. The predecessor
+// was launched by testLauncher (start time launcherBoot).
+func (e *testEnv) adopt(kind Kind, repo string, ticket int) Permit {
+	e.t.Helper()
+	e.killProc(testLauncher)
+	e.setProc(adopter, "777")
+	req := e.req(kind, repo, ticket)
+	req.Launcher, req.Adopt = adopter, true
+	d := e.admit(req)
+	if !d.Admitted || !d.Permit.Adopted {
+		e.t.Fatalf("Admit = %+v, want the predecessor's entry adopted", d)
+	}
+	return d.Permit
+}
+
+func (e *testEnv) restore(pid int, p Permit) error {
+	e.t.Helper()
+	var err error
+	e.as(pid, func() { err = e.ledger.Restore(p) })
+	return err
+}
+
+func TestAdoptedPermitCarriesThePredecessorsLauncherInMemory(t *testing.T) {
+	e := newEnv(t)
+	first := e.mustAdmit(e.req(KindCIRepair, "o/a", 90))
+	if first.PrevLauncherPID != 0 || first.PrevLauncherStart != "" {
+		t.Fatalf("a fresh permit = %+v, want no pre-adoption launcher", first)
+	}
+	adopted := e.adopt(KindCIRepair, "o/a", 90)
+	if adopted.PrevLauncherPID != testLauncher || adopted.PrevLauncherStart != launcherBoot {
+		t.Fatalf("permit = %+v, want the pre-adoption launcher %d/%q", adopted, testLauncher, launcherBoot)
+	}
+	if got := e.held()[0]; got.LauncherPID != adopter || got.LauncherStart != "777" {
+		t.Fatalf("entry = %+v, want the adopter as its launcher", got)
+	}
+}
+
+func TestRestoreReturnsAConfirmedPredecessorToItsPreAdoptionState(t *testing.T) {
+	e := newEnv(t)
+	p := e.mustAdmit(e.req(KindCIRepair, "o/a", 90))
+	e.confirm(p)
+	before := e.held()[0]
+	e.advance(time.Minute)
+	permit := e.adopt(KindCIRepair, "o/a", 90)
+	if permit.State != StateConfirmed {
+		t.Fatalf("Permit.State = %q, want confirmed", permit.State)
+	}
+	e.advance(time.Minute)
+	staleRead := e.inv() // read before the restore, shows no window
+	e.advance(time.Second)
+
+	if err := e.restore(adopter, permit); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	got := e.held()
+	if len(got) != 1 {
+		t.Fatalf("entries = %+v, want the entry kept", got)
+	}
+	g := got[0]
+	if g.State != StateConfirmed || g.LauncherPID != testLauncher || g.LauncherStart != launcherBoot {
+		t.Errorf("entry = %+v, want confirmed under the predecessor's launcher %d/%q", g, testLauncher, launcherBoot)
+	}
+	if g.HolderID != before.HolderID || g.Socket != before.Socket || g.Window != before.Window || g.Dir != before.Dir ||
+		g.LaunchID != before.LaunchID || g.Branch != before.Branch || g.Kind != before.Kind || !g.CreatedAt.Equal(before.CreatedAt) {
+		t.Errorf("entry = %+v, want every other field as it was: %+v", g, before)
+	}
+	if !g.UpdatedAt.Equal(e.clock()) {
+		t.Errorf("UpdatedAt = %s, want the restore time %s", g.UpdatedAt, e.clock())
+	}
+	// The restore voids an inventory read before it: it cannot release the worker.
+	if released := e.reconcile(staleRead); len(released) != 0 {
+		t.Fatalf("an inventory read before the restore released %+v", released)
+	}
+	// A complete inventory read after it frees the entry, the confirmed rule.
+	e.advance(time.Second)
+	if released := e.reconcile(e.inv()); len(released) != 1 {
+		t.Fatalf("released = %+v, want the restored confirmed entry freed by a later complete inventory", released)
+	}
+}
+
+func TestRestoreReturnsAReservedPredecessorToItsDeadLauncher(t *testing.T) {
+	e := newEnv(t)
+	e.mustAdmit(e.req(KindCIRepair, "o/a", 90))
+	permit := e.adopt(KindCIRepair, "o/a", 90)
+	if permit.State != StateReserved {
+		t.Fatalf("Permit.State = %q, want reserved", permit.State)
+	}
+	e.advance(time.Minute)
+
+	if err := e.restore(adopter, permit); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	g := e.held()[0]
+	if g.State != StateReserved || g.LauncherPID != testLauncher || g.LauncherStart != launcherBoot {
+		t.Fatalf("entry = %+v, want reserved under the predecessor's launcher %d/%q", g, testLauncher, launcherBoot)
+	}
+	// Its launcher is dead and no window exists: the existing release rules free it.
+	e.advance(time.Second)
+	if released := e.reconcile(e.inv()); len(released) != 1 {
+		t.Fatalf("released = %+v, want the restored reserved entry freed (dead launcher, no window)", released)
+	}
+}
+
+func TestRestoreOfAnEntryThatIsGoneIsNotHeldAndCreatesNothing(t *testing.T) {
+	e := newEnv(t)
+	err := e.restore(testLauncher, Permit{HolderID: "gone", Kind: KindCIRepair, Repo: "o/a", Ticket: 90, Adopted: true, State: StateConfirmed, PrevLauncherPID: 7, PrevLauncherStart: "12"})
+	if !errors.Is(err, ErrNotHeld) {
+		t.Fatalf("Restore = %v, want ErrNotHeld", err)
+	}
+	if _, serr := os.Stat(filepath.Join(e.dir, "ledger.json")); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("Restore created the ledger: %v", serr)
+	}
+
+	// With the ledger present, a holder that is not in it is the same answer and
+	// adds no entry.
+	e.mustAdmit(e.req(KindImplement, "o/a", 1))
+	if err := e.restore(testLauncher, Permit{HolderID: "gone", Adopted: true, State: StateReserved, PrevLauncherPID: 7}); !errors.Is(err, ErrNotHeld) {
+		t.Fatalf("Restore = %v, want ErrNotHeld", err)
+	}
+	if got := e.held(); len(got) != 1 {
+		t.Fatalf("entries = %+v, want only the original entry", got)
+	}
+}
+
+func TestRestoreByAProcessThatDidNotLaunchTheEntryChangesNothing(t *testing.T) {
+	e := newEnv(t)
+	e.mustAdmit(e.req(KindCIRepair, "o/a", 90))
+	permit := e.adopt(KindCIRepair, "o/a", 90)
+	before := e.held()[0]
+	e.setProc(7777, "5")
+	e.advance(time.Minute)
+
+	if err := e.restore(7777, permit); err != nil {
+		t.Fatalf("Restore by another process = %v, want nil and no change", err)
+	}
+	if got := e.held()[0]; got != before {
+		t.Fatalf("entry = %+v, want it untouched: %+v", got, before)
+	}
+	// A reused pid is not the launcher either.
+	e.setProc(adopter, "888888")
+	if err := e.restore(adopter, permit); err != nil {
+		t.Fatalf("Restore by a reused pid = %v, want nil and no change", err)
+	}
+	if got := e.held()[0]; got != before {
+		t.Fatalf("entry = %+v, want it untouched by a reused pid: %+v", got, before)
+	}
+}
+
+func TestRestoreLeavesAnEntryTheAdopterAlreadyConfirmed(t *testing.T) {
+	e := newEnv(t)
+	e.mustAdmit(e.req(KindCIRepair, "o/a", 90))
+	permit := e.adopt(KindCIRepair, "o/a", 90)
+	e.advance(time.Second)
+	if err := e.ledger.Confirm(permit, Confirmation{Socket: testSocket, Window: windowName(KindCIRepair, 90), Dir: repoDir("o/a")}); err != nil {
+		t.Fatal(err)
+	}
+	before := e.held()[0]
+	e.advance(time.Second)
+
+	if err := e.restore(adopter, permit); err != nil {
+		t.Fatalf("Restore = %v, want nil and no change: the entry is no longer reserved", err)
+	}
+	if got := e.held()[0]; got != before {
+		t.Fatalf("entry = %+v, want the confirmed entry untouched: %+v", got, before)
+	}
+}
+
+func TestRestoreRefusesAPermitThatWasNotAdopted(t *testing.T) {
+	e := newEnv(t)
+	p := e.mustAdmit(e.req(KindImplement, "o/a", 1))
+	before := e.held()[0]
+
+	if err := e.restore(testLauncher, p); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Restore of a fresh permit = %v, want ErrInvalidRequest", err)
+	}
+	// An adopted permit that cannot name a readable pre-adoption state would write
+	// an entry the ledger could not read back.
+	adopted := Permit{HolderID: p.HolderID, Adopted: true, State: StateReserved, PrevLauncherPID: 7}
+	for name, bad := range map[string]Permit{
+		"no launcher pid":       {HolderID: p.HolderID, Adopted: true, State: StateReserved},
+		"launcher pid past int": {HolderID: p.HolderID, Adopted: true, State: StateReserved, PrevLauncherPID: math.MaxInt32 + 1},
+		"unknown state":         {HolderID: p.HolderID, Adopted: true, State: "limbo", PrevLauncherPID: 7},
+		"unclean start":         {HolderID: p.HolderID, Adopted: true, State: StateReserved, PrevLauncherPID: 7, PrevLauncherStart: "1\n2"},
+	} {
+		if err := e.restore(testLauncher, bad); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("Restore(%s) = %v, want ErrInvalidRequest", name, err)
+		}
+	}
+	if got := e.held()[0]; got != before {
+		t.Fatalf("entry = %+v, want it untouched: %+v", got, before)
+	}
+	if err := e.restore(testLauncher, adopted); err != nil {
+		t.Fatalf("Restore of a well-formed adopted permit = %v", err)
+	}
+}
+
 // ---- failure modes ---------------------------------------------------------
 
 func TestUnreadableLedgerAdmitsNothingAndIsNeverReset(t *testing.T) {
@@ -1020,7 +1544,9 @@ func TestUnreadableLedgerAdmitsNothingAndIsNeverReset(t *testing.T) {
 		"missing schema":            {`{"entries":[],"waits":[]}`, ErrCorrupt},
 		"null schema":               {`{"schema":null,"entries":[],"waits":[]}`, ErrCorrupt},
 		"string schema":             {`{"schema":"1","entries":[],"waits":[]}`, ErrCorrupt},
-		"unknown schema":            {`{"schema":2,"entries":[],"waits":[]}`, ErrUnknownSchema},
+		"unknown schema":            {`{"schema":3,"entries":[],"waits":[]}`, ErrUnknownSchema},
+		"schema zero":               {`{"schema":0,"entries":[],"waits":[]}`, ErrUnknownSchema},
+		"negative schema":           {`{"schema":-1,"entries":[],"waits":[]}`, ErrUnknownSchema},
 		"unknown schema other keys": {`{"schema":9,"slots":[]}`, ErrUnknownSchema},
 		"missing entries":           {`{"schema":1,"waits":[]}`, ErrCorrupt},
 		"null entries":              {`{"schema":1,"entries":null,"waits":[]}`, ErrCorrupt},
@@ -1039,6 +1565,19 @@ func TestUnreadableLedgerAdmitsNothingAndIsNeverReset(t *testing.T) {
 		"duplicate holder":          {withEntry(entry + `,` + entry), ErrCorrupt},
 		"confirmed without window":  {withEntry(strings.Replace(entry, `"reserved"`, `"confirmed"`, 1)), ErrCorrupt},
 		"wait missing key":          {`{"schema":1,"entries":[],"waits":[{"repo":"o/a"}]}`, ErrCorrupt},
+		// Schema 2 waits carry exactly nine keys, schema 1 waits exactly seven.
+		"schema 2 wait with the 7 schema 1 keys": {schemaTwo(waitV1), ErrCorrupt},
+		"schema 1 wait with the 9 schema 2 keys": {schemaOne(waitV2("4242", `"100"`)), ErrCorrupt},
+		"schema 2 wait missing ownerStart":       {schemaTwo(strings.Replace(waitV2("4242", `"100"`), `,"ownerStart":"100"`, ``, 1)), ErrCorrupt},
+		"schema 2 negative ownerPid":             {schemaTwo(waitV2("-4", `"100"`)), ErrCorrupt},
+		"schema 2 ownerPid past int32":           {schemaTwo(waitV2("2147483648", `"100"`)), ErrCorrupt},
+		"schema 2 fractional ownerPid":           {schemaTwo(waitV2("4.5", `"100"`)), ErrCorrupt},
+		"schema 2 string ownerPid":               {schemaTwo(waitV2(`"4242"`, `"100"`)), ErrCorrupt},
+		"schema 2 null ownerPid":                 {schemaTwo(waitV2("null", `"100"`)), ErrCorrupt},
+		"schema 2 numeric ownerStart":            {schemaTwo(waitV2("4242", `100`)), ErrCorrupt},
+		"schema 2 null ownerStart":               {schemaTwo(waitV2("4242", `null`)), ErrCorrupt},
+		"schema 2 ownerStart with a newline":     {schemaTwo(waitV2("4242", `"1\n0"`)), ErrCorrupt},
+		"schema 2 over-long ownerStart":          {schemaTwo(waitV2("4242", `"`+strings.Repeat("9", 600)+`"`)), ErrCorrupt},
 		// Strings the ledger writes back into log and status lines.
 		"entry newline in repo":         {withEntry(strings.Replace(entry, `"o/a"`, `"o/a\nreconcile: forged"`, 1)), ErrCorrupt},
 		"entry control char in repo":    {withEntry(strings.Replace(entry, `"o/a"`, `"o/a\u001b[2J"`, 1)), ErrCorrupt},
@@ -1614,6 +2153,10 @@ func TestCorruptEntryErrorNamesTheEntryAndTheCheckButNoValue(t *testing.T) {
 		{"null field", third(replace(`"branch":""`, `"branch":null`)), "entry 3: keys missing or unknown", ""},
 		{"wrong field type", third(replace(`"ticket":1`, `"ticket":"one"`)), "entry 3: field type invalid", ""},
 		{"wait with no ticket", `{"schema":1,"entries":[],"waits":[` + wait + `]}`, "wait 1: ticket out of range", ""},
+		{"wait with a negative owner pid", schemaTwo(waitV2("-4", `"100"`)), "wait 1: owner pid out of range", ""},
+		{"wait with an owner pid past int32", schemaTwo(waitV2("2147483648", `"100"`)), "wait 1: owner pid out of range", "2147483648"},
+		{"wait with a non-string owner start", schemaTwo(waitV2("4242", `100`)), "wait 1: field type invalid", ""},
+		{"wait with an unclean owner start", schemaTwo(waitV2("4242", `"1\u001b[2J"`)), "wait 1: ownerStart invalid", "[2J"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

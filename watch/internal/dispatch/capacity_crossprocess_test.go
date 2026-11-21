@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -424,6 +425,69 @@ func TestCrossProcessBabysitDefersABranchWithALiveDispatchWriter(t *testing.T) {
 	}
 	if held := w.entries(t); len(held) != 1 || held[0].Ticket != 201 || held[0].Branch != crossProcessBranch {
 		t.Errorf("the ledger holds %s, want only dispatch's #201 on %s", describe(held), crossProcessBranch)
+	}
+}
+
+// -- item 4 (#1578): a wait owned by a killed process -----------------------------
+
+// waitsOf is what the shared ledger holds as wait records, read the way `cenci
+// dispatch status` does (no lock, nothing created).
+func (w *crossWorld) waitsOf(t *testing.T) []capacity.Wait {
+	t.Helper()
+	l := capacity.NewLedger(filepath.Join(w.stateHome, "cenci", "capacity"), capacity.Options{})
+	snap, err := l.Peek()
+	if err != nil {
+		t.Fatalf("reading the ledger: %v", err)
+	}
+	return snap.Waits
+}
+
+// A real process records a wait on the shared ledger (a babysit repair that found
+// the host full), so dispatch keeps one slot free for it. While the process lives,
+// a dispatch pass with exactly one free slot is refused. Once it is killed with
+// SIGKILL and reaped, the next pass is admitted at once: the wait's owner is dead,
+// so the ledger drops it without waiting for the three poll intervals (here an
+// hour each) to pass.
+func TestCrossProcessAKilledWaitersWaitNoLongerHoldsBackTheLastSlot(t *testing.T) {
+	w := newCrossWorld(t, 1)
+	ready := filepath.Join(t.TempDir(), "ready")
+	waiter := startProc(t, "wait", capacityRepoEnv+"="+w.h.repo, capacityPREnv+"="+strconv.Itoa(crossProcessPR), capacityReadyEnv+"="+ready)
+	deadline := time.Now().Add(crossProcessBudget)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the wait helper never recorded its wait:\n%s", waiter.out.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	waits := w.waitsOf(t)
+	if len(waits) != 1 || waits[0].OwnerPID != waiter.cmd.Process.Pid || waits[0].Ticket != crossProcessPR {
+		t.Fatalf("the ledger holds waits %+v, want the helper's (pid %d) for PR %d", waits, waiter.cmd.Process.Pid, crossProcessPR)
+	}
+
+	// A live owner keeps the #1469 priority rule: with one free slot and one live wait,
+	// dispatch is refused.
+	out := w.dispatchProc(t, w.fleet).wait(t)
+	if dispatched, _ := w.launched(t); len(dispatched) != 0 {
+		t.Fatalf("dispatch launched %v with the one free slot reserved for a live waiter:\n%s", dispatched, out)
+	}
+	if !hasLine(out, skipLine(w.h.repo, 201, "concurrency cap reached")) {
+		t.Errorf("dispatch did not log `skip: concurrency cap reached` for #201 while the waiter lived:\n%s", out)
+	}
+
+	if err := waiter.cmd.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatalf("killing the wait helper: %v", err)
+	}
+	_ = waiter.cmd.Wait() // reaps it; the error is the SIGKILL itself
+
+	out = w.dispatchProc(t, w.fleet).wait(t)
+	if dispatched, _ := w.launched(t); len(dispatched) != 1 || dispatched[0] != "201" {
+		t.Fatalf("dispatch launched %v after the waiter was killed, want #201:\n%s", dispatched, out)
+	}
+	if got := w.waitsOf(t); len(got) != 0 {
+		t.Errorf("the ledger still holds waits %+v after the admission", got)
 	}
 }
 

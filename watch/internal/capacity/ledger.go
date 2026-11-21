@@ -60,8 +60,11 @@ const (
 )
 
 const (
-	ledgerFile   = "ledger.json"
-	ledgerSchema = 1
+	ledgerFile = "ledger.json"
+	// ledgerSchema is the schema every write stores. Schema 1 (a wait record with
+	// no owner) is still read; any other value is an unknown schema.
+	ledgerSchema   = 2
+	ledgerSchemaV1 = 1
 	// maxLedgerBytes is the ledger's own read limit (the store's default stays
 	// 4096 for daily-quota.json), and a write over it is refused so the ledger can
 	// never grow past what it can read back.
@@ -157,9 +160,16 @@ type Wait struct {
 	Since       time.Time `json:"since"`
 	RefreshedAt time.Time `json:"refreshedAt"`
 	ExpiresAt   time.Time `json:"expiresAt"`
+	// OwnerPID and OwnerStart identify the process that recorded or last
+	// refreshed the wait, like Entry.LauncherPID/LauncherStart: a wait whose owner
+	// is dead is dropped before it expires. OwnerStart is empty where the start
+	// time cannot be read. OwnerPID 0 is a schema 1 wait, which has no owner and
+	// expires by time alone.
+	OwnerPID   int    `json:"ownerPid"`
+	OwnerStart string `json:"ownerStart"`
 }
 
-// ledgerState is the persisted file: {"schema":1,"entries":[...],"waits":[...]}.
+// ledgerState is the persisted file: {"schema":2,"entries":[...],"waits":[...]}.
 type ledgerState struct {
 	Schema  int     `json:"schema"`
 	Entries []Entry `json:"entries"`
@@ -168,7 +178,10 @@ type ledgerState struct {
 
 var (
 	entryKeys = []string{"holderId", "kind", "repo", "ticket", "branch", "launcherPid", "launcherStart", "socket", "window", "dir", "launchId", "state", "createdAt", "updatedAt"}
-	waitKeys  = []string{"repo", "ticket", "kind", "reason", "since", "refreshedAt", "expiresAt"}
+	// waitKeysV1 are the seven keys of a schema 1 wait; waitKeysV2 adds the owner.
+	// Entries carry the same keys under both schemas.
+	waitKeysV1 = []string{"repo", "ticket", "kind", "reason", "since", "refreshedAt", "expiresAt"}
+	waitKeysV2 = append(slices.Clone(waitKeysV1), "ownerPid", "ownerStart")
 )
 
 // Snapshot is a read of the ledger.
@@ -249,9 +262,9 @@ func (r Request) validate() error {
 const badFieldReason = "a field is over-long, holds a control character or is not valid UTF-8"
 
 // Permit is a held slot, handed back by an admitted Admit. It is passed to
-// Confirm and Release. For an adopted entry, State says how far the original
-// launch got: a reserved entry may or may not have spawned, so the adopter
-// decides by observing the worker, never by the permit alone.
+// Confirm, Release and Restore. For an adopted entry, State says how far the
+// original launch got: a reserved entry may or may not have spawned, so the
+// adopter decides by observing the worker, never by the permit alone.
 type Permit struct {
 	HolderID string
 	Kind     Kind
@@ -260,6 +273,11 @@ type Permit struct {
 	Window   string
 	State    State
 	Adopted  bool
+	// PrevLauncherPID and PrevLauncherStart are, for an adopted entry, the launcher
+	// the entry had before the adoption, so Restore can hand it back. They live in
+	// the permit only: the file never stores them.
+	PrevLauncherPID   int
+	PrevLauncherStart string
 }
 
 // Decision is the outcome of one Admit. Reason is set when it is not admitted.
@@ -304,7 +322,11 @@ type Options struct {
 	Now func() time.Time
 	// Probe reports a process's start time (empty where unavailable) and whether
 	// it is alive.
-	Probe       func(pid int) (start string, alive bool)
+	Probe func(pid int) (start string, alive bool)
+	// PID reports the calling process: the default launcher of Admit, the owner
+	// Wait stamps on a wait record and the launcher Restore checks. The default is
+	// os.Getpid.
+	PID         func() int
 	LockTimeout time.Duration
 }
 
@@ -313,11 +335,12 @@ type Ledger struct {
 	store *Store
 	now   func() time.Time
 	probe func(pid int) (string, bool)
+	pid   func() int
 }
 
 // NewLedger returns a Ledger over dir.
 func NewLedger(dir string, opts Options) *Ledger {
-	l := &Ledger{store: NewStore(dir), now: opts.Now, probe: opts.Probe}
+	l := &Ledger{store: NewStore(dir), now: opts.Now, probe: opts.Probe, pid: opts.PID}
 	l.store.lockTimeout = ledgerLockTimeout
 	if opts.LockTimeout > 0 {
 		l.store.lockTimeout = opts.LockTimeout
@@ -327,6 +350,9 @@ func NewLedger(dir string, opts Options) *Ledger {
 	}
 	if l.probe == nil {
 		l.probe = defaultProbe
+	}
+	if l.pid == nil {
+		l.pid = os.Getpid
 	}
 	return l
 }
@@ -374,8 +400,9 @@ func corrupt(kind string, index int, check string) error {
 	return fmt.Errorf("%w: %s %d: %s", ErrCorrupt, kind, index+1, check)
 }
 
-// decodeLedger decodes strictly. A schema other than 1 is reported before the
-// other keys are looked at, since a newer schema may have different ones.
+// decodeLedger decodes strictly. A schema other than 1 or 2 is reported before
+// the other keys are looked at, since a newer schema may have different ones.
+// Schema 1 differs only in its waits, which carry no owner.
 func decodeLedger(data []byte) (ledgerState, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	var top map[string]json.RawMessage
@@ -393,7 +420,12 @@ func decodeLedger(data []byte) (ledgerState, error) {
 	if err := json.Unmarshal(rawSchema, &schema); err != nil {
 		return ledgerState{}, ErrCorrupt
 	}
-	if schema != ledgerSchema {
+	waitKeys := waitKeysV2
+	switch schema {
+	case ledgerSchema:
+	case ledgerSchemaV1:
+		waitKeys = waitKeysV1
+	default:
 		return ledgerState{}, ErrUnknownSchema
 	}
 	if len(top) != 3 {
@@ -518,6 +550,10 @@ func (w Wait) invalid() string {
 		return "refreshedAt unset"
 	case w.ExpiresAt.IsZero():
 		return "expiresAt unset"
+	case w.OwnerPID < 0 || w.OwnerPID > math.MaxInt32:
+		return "owner pid out of range"
+	case !cleanField(w.OwnerStart, maxFieldBytes):
+		return "ownerStart invalid"
 	}
 	return ""
 }
@@ -716,17 +752,24 @@ func (l *Ledger) Owns(e Entry, pid int) bool {
 	return e.ownedBy(pid, start)
 }
 
-// launcherDead reports whether e's launcher is gone: no such process, or the
-// pid now has a different start time (it was reused by an unrelated process).
-func (l *Ledger) launcherDead(e Entry) bool {
-	if e.LauncherPID <= 0 {
+// processGone reports whether the process recorded as pid with start time start
+// is gone: no such process, or the pid now has a different start time (it was
+// reused by an unrelated process). A start time that is empty on either side (a
+// platform that cannot read it) is no disagreement, so liveness alone decides.
+func (l *Ledger) processGone(pid int, start string) bool {
+	if pid <= 0 {
 		return true
 	}
-	start, alive := l.probe(e.LauncherPID)
+	now, alive := l.probe(pid)
 	if !alive {
 		return true
 	}
-	return e.LauncherStart != "" && start != "" && start != e.LauncherStart
+	return start != "" && now != "" && now != start
+}
+
+// launcherDead reports whether e's launcher is gone.
+func (l *Ledger) launcherDead(e Entry) bool {
+	return l.processGone(e.LauncherPID, e.LauncherStart)
 }
 
 // ---- release rules ---------------------------------------------------------
@@ -767,10 +810,14 @@ func (l *Ledger) releaseGone(st *ledgerState, inv Inventory) []Entry {
 	return released
 }
 
-// pruneWaits removes expired wait records and reports whether any went.
-func (st *ledgerState) pruneWaits(now time.Time) bool {
+// pruneWaits removes the wait records that expired and those whose owner is gone,
+// and reports whether any went. A wait with ownerPid 0 (a schema 1 wait) has no
+// owner to check and expires by time alone.
+func (l *Ledger) pruneWaits(st *ledgerState, now time.Time) bool {
 	before := len(st.Waits)
-	st.Waits = slices.DeleteFunc(st.Waits, func(w Wait) bool { return !w.ExpiresAt.After(now) })
+	st.Waits = slices.DeleteFunc(st.Waits, func(w Wait) bool {
+		return !w.ExpiresAt.After(now) || (w.OwnerPID > 0 && l.processGone(w.OwnerPID, w.OwnerStart))
+	})
 	return len(st.Waits) != before
 }
 
@@ -815,12 +862,12 @@ func (l *Ledger) Admit(req Request) (Decision, error) {
 	}
 	launcher := req.Launcher
 	if launcher == 0 {
-		launcher = os.Getpid()
+		launcher = l.pid()
 	}
 	start, _ := l.probe(launcher)
 	var dec Decision
 	err := l.mutate(true, func(st *ledgerState, now time.Time) (bool, error) {
-		changed := st.pruneWaits(now)
+		changed := l.pruneWaits(st, now)
 		if len(l.releaseGone(st, req.Obs.Inventory)) > 0 {
 			changed = true
 		}
@@ -848,10 +895,12 @@ func (l *Ledger) evaluate(st *ledgerState, req Request, launcher int, start stri
 			// becomes a launch in flight again. Reserved with this launcher alive, it
 			// cannot be released by anyone's inventory (not even one that has not yet
 			// seen the new window), and UpdatedAt = now voids every inventory read
-			// before the adoption. The adopter settles it: Confirm, or Release when
-			// the launch fails before `cenci run`. Babysit refuses to adopt while the
-			// PR's worker is live, so a live worker never meets this reset.
+			// before the adoption. The adopter settles it: Confirm, or Restore (with
+			// the pre-adoption launcher the permit carries) when the launch fails
+			// before `cenci run`. Babysit refuses to adopt while the PR's worker is
+			// live, so a live worker never meets this reset.
 			permit := permitOf(*e, true)
+			permit.PrevLauncherPID, permit.PrevLauncherStart = e.LauncherPID, e.LauncherStart
 			e.LauncherPID, e.LauncherStart = launcher, start
 			e.State, e.UpdatedAt = StateReserved, now
 			st.dropWait(req.Repo, req.Ticket)
@@ -942,13 +991,44 @@ func (l *Ledger) Release(p Permit) error {
 	})
 }
 
+// Restore hands an adopted entry back to the state it had before the adoption,
+// for a launch that failed before `cenci run`: where Release deletes the entry
+// (right for a fresh reservation), Restore keeps what may still be a live worker's
+// slot. It sets State, LauncherPID and LauncherStart from the permit's
+// pre-adoption fields, and UpdatedAt to now, so an inventory read before the
+// restore cannot judge the entry. It changes the entry only when it is still
+// reserved and launched by the calling process: an entry another process or a
+// Confirm already took over is left as it is. A permit that is not an adopted one
+// is ErrInvalidRequest, and an entry that is gone is ErrNotHeld. It creates
+// nothing.
+func (l *Ledger) Restore(p Permit) error {
+	if !p.Adopted || (p.State != StateReserved && p.State != StateConfirmed) ||
+		p.PrevLauncherPID <= 0 || p.PrevLauncherPID > math.MaxInt32 || !cleanField(p.PrevLauncherStart, maxFieldBytes) {
+		return fmt.Errorf("%w: the permit holds no adopted entry to restore", ErrInvalidRequest)
+	}
+	pid := l.pid()
+	start, _ := l.probe(pid)
+	return l.mutate(false, func(st *ledgerState, now time.Time) (bool, error) {
+		i := st.indexOf(p.HolderID)
+		if i < 0 {
+			return false, ErrNotHeld
+		}
+		e := &st.Entries[i]
+		if e.State != StateReserved || !e.ownedBy(pid, start) {
+			return false, nil
+		}
+		e.State, e.LauncherPID, e.LauncherStart, e.UpdatedAt = p.State, p.PrevLauncherPID, p.PrevLauncherStart, now
+		return true, nil
+	})
+}
+
 // Reconcile applies the release rules to inv and returns the entries it freed.
 // It creates nothing, and an inventory that is incomplete, unread or older than
 // an entry frees nothing for that entry.
 func (l *Ledger) Reconcile(inv Inventory) ([]Entry, error) {
 	var released []Entry
 	err := l.mutate(false, func(st *ledgerState, now time.Time) (bool, error) {
-		pruned := st.pruneWaits(now)
+		pruned := l.pruneWaits(st, now)
 		released = l.releaseGone(st, inv)
 		return pruned || len(released) > 0, nil
 	})
@@ -960,13 +1040,27 @@ func (l *Ledger) Reconcile(inv Inventory) ([]Entry, error) {
 
 // Wait records or refreshes a repair's wait for capacity. The record keeps its
 // first Since, holds no slot, and expires 3 Intervals from now unless refreshed.
+// It is owned by the calling process (pid and start time), so it is dropped
+// early once that process is gone; a refresh by another process takes over the
+// ownership.
 func (l *Ledger) Wait(w WaitRequest) error {
 	if !w.Kind.valid() || w.Repo == "" || w.Ticket <= 0 || w.Interval <= 0 {
 		return fmt.Errorf("%w: incomplete wait", ErrInvalidRequest)
 	}
+	owner := l.pid()
+	if owner <= 0 || owner > math.MaxInt32 {
+		return fmt.Errorf("%w: the owner pid is out of range", ErrInvalidRequest)
+	}
+	ownerStart, _ := l.probe(owner)
+	if !cleanField(ownerStart, maxFieldBytes) {
+		ownerStart = ""
+	}
 	return l.mutate(true, func(st *ledgerState, now time.Time) (bool, error) {
-		st.pruneWaits(now)
-		rec := Wait{Repo: w.Repo, Ticket: w.Ticket, Kind: w.Kind, Reason: w.Reason, Since: now, RefreshedAt: now, ExpiresAt: now.Add(WaitIntervals * w.Interval)}
+		l.pruneWaits(st, now)
+		rec := Wait{
+			Repo: w.Repo, Ticket: w.Ticket, Kind: w.Kind, Reason: w.Reason, Since: now, RefreshedAt: now, ExpiresAt: now.Add(WaitIntervals * w.Interval),
+			OwnerPID: owner, OwnerStart: ownerStart,
+		}
 		if i := slices.IndexFunc(st.Waits, func(o Wait) bool { return o.Ticket == w.Ticket && strings.EqualFold(o.Repo, w.Repo) }); i >= 0 {
 			rec.Since = st.Waits[i].Since
 			st.Waits[i] = rec

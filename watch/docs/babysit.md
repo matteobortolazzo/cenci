@@ -199,6 +199,19 @@ priority over new dispatch pickups: dispatch admits only when its free slots exc
 live wait records, while a repair needs a single free slot, and waiting repairs do not block
 each other.
 
+A wait record is owned by the process that wrote it, the supervisor (`ownerPid` and
+`ownerStart`, the pid and `/proc/<pid>/stat` start time the ledger also records for an
+entry's launcher; a refresh by another process takes the ownership over). A supervisor killed
+without cleaning up therefore does not leave dispatch one slot short until the wait expires:
+a wait whose owner is dead, or whose pid now has a different start time (a reused pid), is
+dropped by the next `Admit`, `Reconcile` or `Wait`, and a dispatch `Admit` with exactly one
+free slot is then admitted. Where the start time cannot be read (`ownerStart` empty), a wait
+is dropped only when its owner pid is not alive, and otherwise expires by time. A wait of a
+schema 1 ledger (`ownerPid` 0) has no owner: it is never dropped by the owner check, only at
+`expiresAt` or by `DropWait`. A live owner's wait keeps the priority rule above unchanged.
+`ledger.json` is schema 2 because of the owner keys; an older binary reads it as unreadable
+and admits nothing until upgraded or restarted (`watch/README.md`).
+
 The wait reasons fail closed: whenever the host's load cannot be known, nothing is admitted
 and the reason says why.
 
@@ -228,12 +241,28 @@ predecessor instead of admitting a second one; an entry of a live foreign launch
 adopted. Adoption makes the entry a launch in flight again: it is `reserved` with the adopter
 as its launcher and its `updatedAt` is now, so no inventory, however fresh, can release it
 before the adopter confirms or releases it (a supervisor never adopts while this PR's worker
-is live, so a running worker keeps its `confirmed` entry). After the launch, the reservation is released only when `cenci run` never ran;
-once it ran, whatever its exit status (3 means the window exists), it is confirmed to the
+is live, so a running worker keeps its `confirmed` entry). After the launch, once `cenci run`
+ran, whatever its exit status (3 means the window exists), the reservation is confirmed to the
 deterministic window `<PR>-<workflow>`, and only a later complete inventory showing no such
-window frees it.
+window frees it. When `cenci run` never ran (for example `launch()` refused with `no tmux
+session was recorded`), a fresh reservation is released, but an **adopted** one is restored,
+never deleted: the predecessor's entry may be a `confirmed` one with a live worker (with no
+recorded `LaunchSession` the supervisor reads no inventory for its own socket, so adoption
+could not tell), and releasing it would undercount that worker. `Ledger.Restore` puts the
+entry back to its pre-adoption `state`, `launcherPid` and `launcherStart` (carried in memory
+on the permit as `PrevLauncherPID`/`PrevLauncherStart`; the file format is unchanged) and
+sets `updatedAt` to now, so an inventory read before the restore cannot judge it. It changes
+the entry only while it is still `reserved` and launched by this supervisor, so an entry
+another process or a confirm already took over is left as it is, and it creates nothing: an
+entry that is gone is logged with the existing `reservation is missing from the ledger`
+line below and none is created. A restored entry is left to the ordinary release rules: a
+`confirmed` one is freed by a complete inventory with no matching live window, and a
+`reserved` one also needs its (dead) predecessor launcher, as before the adoption. A restore
+that fails twice leaves the entry `reserved` under this supervisor, and the next tick's
+self-heal (below) settles it from the entry's own socket inventory, which is correct whether
+the worker is live or gone.
 
-A `Release` or `Confirm` that fails with a transient error (the store lock was busy or the
+A `Release`, `Restore` or `Confirm` that fails with a transient error (the store lock was busy or the
 store was briefly unreadable) is retried once after a short pause, the same bounded retry
 dispatch uses (`capacity.RetryTransient`); a permanent error (a corrupt or unknown-schema
 ledger, an invalid request) is not retried. A `Confirm` whose entry is no longer in the

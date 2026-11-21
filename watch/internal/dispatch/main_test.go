@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -141,6 +142,11 @@ func limitsOfConfig(cfg Config) (capacity.Limits, error) {
 //     exits CENCI_CAPACITY_RUN_EXIT (default 0; 3 is "window spawned, setup
 //     failed").
 //
+//   - `wait` records a babysit-style wait (a ci-repair of PR CENCI_CAPACITY_PR on
+//     repo CENCI_CAPACITY_REPO, 1h poll interval) on the ledger at capacity.Dir(),
+//     creates the file CENCI_CAPACITY_READY and then blocks until it is killed. The
+//     parent SIGKILLs it, so the wait is left behind by a dead owner.
+//
 // A helper clears CENCI_CAPACITY_HELPER from its own environment, so the processes
 // it starts (the fake `gh` shim re-execs this binary as its own test entry point)
 // are not helpers themselves.
@@ -160,7 +166,12 @@ const (
 	capacityChdirEnv      = "CENCI_CAPACITY_CHDIR"
 	capacityBarrierEnv    = "CENCI_CAPACITY_BARRIER"
 	capacitySessionEnv    = "CENCI_CAPACITY_SESSION"
+	capacityRepoEnv       = "CENCI_CAPACITY_REPO"
+	capacityReadyEnv      = "CENCI_CAPACITY_READY"
 	capacityBarrierBudget = 30 * time.Second
+	// capacityWaitInterval is the poll interval the `wait` helper records: far
+	// longer than any test, so only the owner check can drop its wait early.
+	capacityWaitInterval = time.Hour
 )
 
 // capacityHelperCmd returns the command that re-execs this test binary as a helper
@@ -177,6 +188,8 @@ func runCapacityHelper(mode string) int {
 		return dispatchHelper()
 	case "babysit":
 		return babysitHelper()
+	case "wait":
+		return waitHelper()
 	}
 	fmt.Fprintf(os.Stderr, "unknown %s mode %q\n", capacityHelperEnv, mode)
 	return 2
@@ -247,6 +260,31 @@ func babysitHelper() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	return 0
+}
+
+// waitHelper records one wait on the shared ledger, signals that it is on disk and
+// blocks until the parent kills it.
+func waitHelper() int {
+	pr, err := strconv.Atoi(os.Getenv(capacityPREnv))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", capacityPREnv, err)
+		return 1
+	}
+	ledger := capacity.NewLedger(capacity.Dir(), capacity.Options{})
+	err = ledger.Wait(capacity.WaitRequest{
+		Kind: capacity.KindCIRepair, Repo: os.Getenv(capacityRepoEnv), Ticket: pr,
+		Reason: capacity.ReasonMachineCap, Interval: capacityWaitInterval,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := os.WriteFile(os.Getenv(capacityReadyEnv), nil, 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	time.Sleep(capacityWaitInterval)
 	return 0
 }
 

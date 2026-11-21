@@ -623,6 +623,9 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		}
 	} else {
 		adm = newAdmitter(cfg, deps, socket, dirByRepo, out)
+		// First, retry the settle of any reservation an earlier pass of this process
+		// left reserved (#1578), so the slot it holds is free for this pass's Admit.
+		settleOwnReservations(adm.ledger, out)
 		permits = adm.admitDecisions(decisions, eligibility)
 	}
 
