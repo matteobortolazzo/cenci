@@ -27,14 +27,14 @@ class ModelEscalation(unittest.TestCase):
                 subprocess.run(["sh", str(FLOW / "codex/install-agents.sh"), tmp],
                                env=env, check=True)
                 specialist = tomllib.loads((roles / "domain-specialist.toml").read_text())
-                self.assertEqual(specialist["model"], "gpt-6-astra")
+                self.assertEqual(specialist["model"], "gpt-6.2-astra")
                 self.assertEqual(specialist["model_reasoning_effort"], "high")
                 self.assertEqual((roles / "planner.toml").read_text(), custom)
                 for name in ("implementer", "critical-reviewer", "context-gatherer", "structure-analyzer"):
                     actual = (roles / f"{name}.toml").read_bytes()
                     self.assertEqual(actual, (FLOW / f"templates/codex/agent-roles/{name}.toml").read_bytes())
                     self.assertIsNone(tomllib.loads(actual.decode()).get("model"), f"{name} must inherit its model")
-            customized = (roles / "domain-specialist.toml").read_text().replace("gpt-6-astra", "custom-specialist")
+            customized = (roles / "domain-specialist.toml").read_text().replace("gpt-6.2-astra", "custom-specialist")
             (roles / "domain-specialist.toml").write_text(customized)
             subprocess.run(["sh", str(FLOW / "codex/install-agents.sh"), tmp], env=env, check=True)
             self.assertEqual((roles / "domain-specialist.toml").read_text(), customized)
@@ -48,7 +48,7 @@ class ModelEscalation(unittest.TestCase):
                 self.assertIsNone(role.get("model"), f"{name} must inherit its model")
                 self.assertIsNone(role.get("model_reasoning_effort"), f"{name} must inherit its effort")
         specialist = tomllib.loads((roles / "domain-specialist.toml").read_text())
-        self.assertEqual(specialist.get("model"), "gpt-6-astra")
+        self.assertEqual(specialist.get("model"), "gpt-6.2-astra")
 
     def test_shipped_specialists_are_read_only_and_mirrored(self):
         claude = (FLOW / "agents/domain-specialist.md").read_text()
@@ -125,7 +125,7 @@ class ModelEscalation(unittest.TestCase):
         for requirement in (
             "cross-project", "sandbox boundaries", "validated config", "two failed attempts",
             "conflicting findings", "Task", "agent_type", 'fork_turns="none"',
-            'model="gpt-6-astra"', "CLAUDE_CODE_SUBAGENT_MODEL",
+            'model="gpt-6.2-astra"', "CLAUDE_CODE_SUBAGENT_MODEL",
             "one specialist pass", "does not reset", "Do not retry a model-access failure",
             "Existing approval", "read the cited source", "OpenCode",
         ):

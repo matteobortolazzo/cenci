@@ -243,7 +243,7 @@ the item-by-item ticket-coverage review that runs after implementation and befor
 Re-running configure installs a new missing role; existing role customizations are preserved.
 
 `domain-specialist` is the exception: it is the escalation role for qualifying tasks and keeps its
-pin to `gpt-6-astra` with high reasoning effort. The [shared policy](model-escalation.md) defines
+pin to `gpt-6.2-astra` with high reasoning effort. The [shared policy](model-escalation.md) defines
 the triggers, bounded read-only dispatch, evidence validation, and unavailable-model fallback. The
 repository's installed roles mirror their templates byte for byte. A pin is configuration, not a
 guarantee of account-level access.

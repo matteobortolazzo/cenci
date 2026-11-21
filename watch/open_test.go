@@ -53,8 +53,8 @@ func TestOpenAllShortcuts_AttachTheirAgentAndModel(t *testing.T) {
 		// as "pending review" and sandbox sessions never report (#426).
 		{"xl", "codex", "gpt-6-luna", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
 		{"xt", "codex", "gpt-6.1-terra", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
-		{"xa", "codex", "gpt-6-astra", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
-		{"xs", "codex", "gpt-6.1-sol", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
+		{"xa", "codex", "gpt-6.2-astra", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
+		{"xs", "codex", "gpt-6.2-sol", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.token, func(t *testing.T) {
@@ -3994,7 +3994,7 @@ func TestCnArgv0_RoutesToOpen(t *testing.T) {
 	}
 
 	line := attachLine(t, callLogLines(t, callLog))
-	if !strings.HasSuffix(line, "/opt/cenci-agent/current/node_modules/.bin/codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --model gpt-6.1-sol") {
+	if !strings.HasSuffix(line, "/opt/cenci-agent/current/node_modules/.bin/codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --model gpt-6.2-sol") {
 		t.Errorf("attach argv = %q, want the codex/sol shortcut resolution", line)
 	}
 }

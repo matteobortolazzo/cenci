@@ -125,9 +125,9 @@ Without the installed plugin, point the launcher at a local checkout's assets:
 ```bash
 # Launch or attach a session (full permissions — the container is the security boundary)
 cn                    # Claude Code (`cn <args>` is exactly `cenci open <args>`)
-cn xa                 # Codex, gpt-6-astra
+cn xa                 # Codex, gpt-6.2-astra
 cn ch                 # Claude, haiku (shortcuts: ch/cs/co/cf, xl/xt/xa/xs)
-cenci open --agent codex --model gpt-6.1-sol --name mybox
+cenci open --agent codex --model gpt-6.2-sol --name mybox
 # OpenCode launches are temporarily disabled.
 
 # Pass args through to the agent CLI — everything after a bare -- is forwarded verbatim
