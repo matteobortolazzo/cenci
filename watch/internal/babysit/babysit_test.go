@@ -5690,6 +5690,22 @@ func TestTickCIRepairProbeErrorRefusesDispatch(t *testing.T) {
 // own "no tmux session was recorded" refusal and nothing is consumed.
 func TestTickCIRepairNoSessionSkipsProbe(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
+	// #1578: a confirmed ci-repair entry of a dead supervisor, whose worker window
+	// is still listed, is adopted by this tick and then refused by launch(). The
+	// entry must survive as it was, not be deleted as a fresh reservation would.
+	h := newCapHarness(t, 3)
+	predecessor := h.admitAs(capDeadLauncher, capacity.Request{
+		Kind: capacity.KindCIRepair, Repo: "o/r", Ticket: 42, Branch: "feature",
+		Socket: capDefaultSocket, Window: "42-ci-repair", Dir: "/repo/root",
+	})
+	if err := h.ledger.Confirm(predecessor, capacity.Confirmation{Socket: capDefaultSocket, Window: "42-ci-repair", Dir: "/repo/root"}); err != nil {
+		t.Fatal(err)
+	}
+	h.addWindow(capDefaultSocket, "42-ci-repair", "/repo/root", false)
+	original := h.entries()
+	if len(original) != 1 || original[0].State != capacity.StateConfirmed || original[0].LauncherPID != capDeadLauncher {
+		t.Fatalf("seeded ledger = %+v, want one confirmed entry of the dead launcher", original)
+	}
 	var calls [][]string
 	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
 	reads := stubPanes(t, panesAlways(noWorkerInventory))
@@ -5710,6 +5726,16 @@ func TestTickCIRepairNoSessionSkipsProbe(t *testing.T) {
 	}
 	if n := countWorkflowLaunches(calls, "ci-repair"); n != 0 {
 		t.Errorf("cenci run ci-repair calls = %d, want 0", n)
+	}
+	got := h.entries()
+	if len(got) != 1 {
+		t.Fatalf("ledger entries = %+v, want the adopted predecessor entry to survive the refused launch", got)
+	}
+	want := original[0]
+	if got[0].HolderID != want.HolderID || got[0].State != capacity.StateConfirmed ||
+		got[0].Socket != want.Socket || got[0].Window != want.Window || got[0].Dir != want.Dir ||
+		got[0].LauncherPID != want.LauncherPID || got[0].LauncherStart != want.LauncherStart {
+		t.Errorf("entry = %+v, want it restored to its original holder, state confirmed, socket, window, dir and launcher %+v", got[0], want)
 	}
 }
 

@@ -172,3 +172,78 @@ func TestParseRepoCap(t *testing.T) {
 		}
 	}
 }
+
+// Stricter is the one rule dispatch applies under `--config <alt>`: the lower of
+// the two machine caps, and per repo the lower cap, a cap present in only one of
+// the two applying as it stands. It is a pure function of two Limits, so the
+// rule is pinned here in both directions; the admission tests in internal/dispatch
+// drive it through real files.
+func TestStricterTakesTheLowerMachineCapInBothDirections(t *testing.T) {
+	for _, tc := range []struct{ a, b, want int }{{2, 5, 2}, {5, 2, 2}, {3, 1, 1}, {1, 3, 1}, {3, 3, 3}} {
+		if got := Stricter(Limits{Machine: tc.a}, Limits{Machine: tc.b}).Machine; got != tc.want {
+			t.Errorf("Stricter(machine %d, machine %d) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestStricterCombinesRepoCapsAsTheMinimumAndKeepsACapPresentInOneSideOnly(t *testing.T) {
+	def := Limits{Machine: 5, Repos: map[string]int{"o/a": 2, "o/b": 1}}
+	alt := Limits{Machine: 5, Repos: map[string]int{"o/a": 1, "o/c": 1}}
+	for name, got := range map[string]Limits{"default, alt": Stricter(def, alt), "alt, default": Stricter(alt, def)} {
+		for repo, want := range map[string]int{"o/a": 1, "o/b": 1, "o/c": 1} {
+			if c, ok := got.RepoCap(repo); !ok || c != want {
+				t.Errorf("%s: RepoCap(%s) = %d, %v; want %d, true", name, repo, c, ok, want)
+			}
+		}
+		if _, ok := got.RepoCap("o/none"); ok {
+			t.Errorf("%s: a repo capped in neither file must stay uncapped", name)
+		}
+		if len(got.Repos) != 3 {
+			t.Errorf("%s: Repos = %v, want exactly the union of both files", name, got.Repos)
+		}
+	}
+}
+
+func TestStricterLeavesBothInputsUntouched(t *testing.T) {
+	def := Limits{Machine: 5, Repos: map[string]int{"o/a": 2}}
+	alt := Limits{Machine: 1, Repos: map[string]int{"o/a": 1, "o/c": 1}}
+	_ = Stricter(def, alt)
+	if def.Machine != 5 || len(def.Repos) != 1 || def.Repos["o/a"] != 2 {
+		t.Errorf("Stricter mutated its first argument: %+v", def)
+	}
+	if alt.Machine != 1 || len(alt.Repos) != 2 || alt.Repos["o/a"] != 1 {
+		t.Errorf("Stricter mutated its second argument: %+v", alt)
+	}
+}
+
+func TestStricterWithNilRepoMapsDoesNotPanic(t *testing.T) {
+	got := Stricter(Limits{Machine: 3}, Limits{Machine: 2, Repos: map[string]int{"o/a": 1}})
+	if c, ok := got.RepoCap("o/a"); !ok || c != 1 || got.Machine != 2 {
+		t.Fatalf("Stricter = %+v, want machine 2 and o/a capped at 1", got)
+	}
+	if got := Stricter(Limits{Machine: 3}, Limits{Machine: 3}); got.Machine != 3 || len(got.Repos) != 0 {
+		t.Fatalf("Stricter of two bare limits = %+v, want machine 3 and no repo caps", got)
+	}
+}
+
+func TestStricterAPauseInEitherFileWins(t *testing.T) {
+	def := Limits{Machine: 3, Repos: map[string]int{}}
+	alt := Limits{Machine: 0, Repos: map[string]int{"o/a": 2}}
+	for name, got := range map[string]Limits{"default, alt": Stricter(def, alt), "alt, default": Stricter(alt, def)} {
+		if got.Machine != 0 {
+			t.Errorf("%s: Machine = %d, want the pause (0)", name, got.Machine)
+		}
+	}
+	zeroRepo := Stricter(Limits{Machine: 3, Repos: map[string]int{"o/a": 0}}, Limits{Machine: 3, Repos: map[string]int{"o/a": 2}})
+	if c, ok := zeroRepo.RepoCap("o/a"); !ok || c != 0 {
+		t.Errorf("RepoCap(o/a) = %d, %v; a repo pause in one file must win", c, ok)
+	}
+}
+
+func TestStricterRepoCapAboveTheEffectiveMachineCapIsClamped(t *testing.T) {
+	// The alt file allows o/a 4 workers, but the default file's machine cap is 2.
+	got := Stricter(Limits{Machine: 2}, Limits{Machine: 5, Repos: map[string]int{"o/a": 4}})
+	if c, ok := got.EffectiveRepoCap("o/a"); !ok || c != 2 {
+		t.Fatalf("EffectiveRepoCap(o/a) = %d, %v; want the effective machine cap 2", c, ok)
+	}
+}

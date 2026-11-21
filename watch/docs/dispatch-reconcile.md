@@ -869,7 +869,8 @@ never refuse a launch `Admit` would grant, and `Admit` is the authoritative chec
   pickup with no recorded branch skips this check while the ticket check still applies); the
   repo cap (`repo concurrency cap reached`); the machine cap (`concurrency cap reached`). A
   dispatch launch needs free slots above the live babysit wait records (waiting repairs have
-  priority and hold no slot); a repair needs one. Usage counts a ledger-held worker that also
+  priority and hold no slot; a wait whose owner process is dead or reused is dropped by this
+  `Admit`, see `watch/docs/babysit.md`); a repair needs one. Usage counts a ledger-held worker that also
   shows up as a running daemon session once, plus running sessions with no entry (manual
   workers), plus orphaned container sessions; supervisors and non-running sessions count
   zero. Per-repo usage is that repo's ledger entries plus this pass's admissions.
@@ -878,6 +879,18 @@ never refuse a launch `Admit` would grant, and `Admit` is the authoritative chec
   socket's `ReadAt` taken just before its listing. The limits are re-read from the config file
   at every admission, so a lowered cap applies at once and kills nothing: a reload from 3 to 1
   with 3 workers live records no kill call and admits nothing until used slots drop below 1.
+  Under `--config <alt>` (a path that is not the default fleet config, compared after
+  `filepath.Abs` and `Clean`) both files are read at every admission and the limits are
+  `capacity.Stricter` of the two: the lower machine cap, and per repo the lower cap, a cap
+  present in only one file applying as it stands, so a pause in either file wins (babysit
+  reads only the default path, and a supervisor the daemon armed cannot see the flag; a repo
+  cap set only in `<alt>` thus binds dispatch's launches but not babysit's, a documented
+  residual). An absent default file is the default machine cap, and one that cannot be read
+  or holds invalid limits (or a default path that cannot be resolved) refuses every
+  admission with the default file's own reason, unwrapped (`capacity limits unreadable:
+  <reason>`). A `--config` that resolves to the default path reads the file once.
+  `ReadCapacityStatus` goes through the same loader, so `cenci dispatch status` shows the
+  effective totals and caps. The cap pre-filter in `Decide` stays on the loaded config.
   No subprocess I/O and no second lock happens inside the ledger lock, and #1566's
   daily-quota `Record` is never called inside it.
 - **Fail closed.** A nil snapshot, a failed orphan probe, unreadable limits or an unreadable
@@ -915,11 +928,39 @@ never refuse a launch `Admit` would grant, and `Admit` is the authoritative chec
   running. A `Release` or `Confirm` that still fails leaves the entry `reserved`, which holds
   the slot (conservative), and is logged with what remains: a `reserved` entry is freed only
   when its launcher is dead, and the launcher is this dispatch process, so an inventory alone
-  never frees it while the process runs. A one-shot pass clears it once it has exited, the
-  daemon after a restart, or `ledger.json` is removed by hand after confirming no worker is
-  live (`watch/README.md`). A settle that failed is not retried by a later pass (documented
-  residual): the next pass of the same daemon does not touch the entry, which is why the
-  entry clears only by one of those three routes.
+  never frees it while the process runs. The next non-dry-run pass of the same process
+  retries the settle (see **Pass-start self-heal** below), so the entry no longer holds its
+  slot for the process lifetime; once the process has exited (a one-shot pass, the daemon
+  after a restart) the first complete inventory with no worker window frees it, or
+  `ledger.json` is removed by hand after confirming no worker is live (`watch/README.md`).
+- **Pass-start self-heal.** `applyDispatch`'s non-dry-run branch calls
+  `settleOwnReservations` right after the admitter is built and before `admitDecisions`, so
+  the daemon's combined loop, `cenci dispatch loop` and `cenci dispatch --once` all run it
+  at the start of every real pass through `RunOnce` (a pass that fails the GitHub-user
+  lookup returns earlier and admits nothing anyway; a dry run makes no ledger write). It
+  peeks the ledger (no lock) and keeps the `reserved` dispatch entries this process launched
+  (`Ledger.Owns` with `os.Getpid()`: pid and start time, so a reused pid is not this
+  process) that are not in flight; a babysit-kind entry and an entry of another live
+  launcher are never touched. With none it returns and reads no tmux inventory. Otherwise it
+  reads the inventory of those entries' sockets once and settles each through `settleOnce`:
+  a running `<n>-implement` window is **confirmed** (`dispatch: capacity: confirmed the
+  <kind> reservation left reserved by an earlier failed settle; its worker window is
+  running`), and a complete inventory read after the entry's `updatedAt` that shows no such
+  window **releases** it (`dispatch: capacity: released the <kind> reservation left
+  reserved by an earlier failed settle; no worker window exists`). A tmux server that is not
+  running (`ErrNoServer`) is a complete, empty inventory. An incomplete listing, an unread
+  socket or a read before the entry's `updatedAt` leaves the entry `reserved` and logs no
+  release (an unreadable or incomplete listing adds a `dispatch: capacity: the tmux
+  inventory of socket ... is unreadable` note). A confirm whose entry is gone logs `dispatch:
+  capacity: the <kind> reservation is missing from the ledger (removed or reset); ...`; a
+  settle that fails again logs `dispatch: capacity: the <kind> reservation could not be
+  settled (<reason>); it stays reserved` and is retried by the next pass; an unreadable
+  ledger logs `dispatch: capacity: the ledger could not be read to settle earlier
+  reservations (<reason>)` and the pass goes on (the admission then reports the ledger as
+  unreadable). Passes of one process are not always sequential (tests run several at once),
+  so a package-level mutex-guarded in-flight holder set keeps the self-heal off a
+  reservation another pass is still settling: `admit` adds the holder, `release` and
+  `confirm` remove it, and the self-heal claims the entries it settles for its own run.
 - **Reconcile housekeeping.** `RunReconcileOnce` calls `reconcileCapacity` first (not on a dry
   run, and not stopped by a held reconcile state): it reads the ledger without a lock, and with
   no entry does nothing and reads no tmux. Otherwise it reads the inventory of each ledger

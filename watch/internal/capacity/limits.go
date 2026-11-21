@@ -50,6 +50,24 @@ func (l Limits) EffectiveRepoCap(repo string) (int, bool) {
 	return min(c, l.Machine), true
 }
 
+// Stricter returns the limits a process admits under when two fleet config files
+// both bind it: the lower machine cap, and per repo the lower cap, a cap present
+// in only one of the two applying as it stands. A pause (a cap of 0) in either
+// file therefore wins. Neither argument is modified.
+func Stricter(a, b Limits) Limits {
+	out := Limits{Machine: min(a.Machine, b.Machine), Repos: make(map[string]int, len(a.Repos)+len(b.Repos))}
+	for _, src := range []map[string]int{a.Repos, b.Repos} {
+		for repo, c := range src {
+			key := strings.ToLower(repo)
+			if prev, ok := out.Repos[key]; ok {
+				c = min(c, prev)
+			}
+			out.Repos[key] = c
+		}
+	}
+	return out
+}
+
 // ParseRepoCap validates one dispatch.repos[].concurrencyCap value: nil when
 // the key is absent, else an integer >= 0 (0 admits nothing for that repo). A
 // null, negative, fractional or non-numeric value is an error naming the key,

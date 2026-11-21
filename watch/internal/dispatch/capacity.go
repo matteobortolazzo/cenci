@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
@@ -33,6 +34,9 @@ import (
 type capacityLedger interface {
 	capacity.Admission
 	Path() string
+	// Owns reports whether an entry was launched by the live process pid, by the
+	// rule the ledger's own adoption uses (pid and start time).
+	Owns(e capacity.Entry, pid int) bool
 }
 
 // The seams below are package variables, like runFn, so no test reaches a real
@@ -42,9 +46,14 @@ var (
 	// capacityLedgerFn returns the shared admission ledger.
 	capacityLedgerFn = func() capacityLedger { return capacity.NewLedger(capacity.Dir(), capacity.Options{}) }
 	// capacityLimitsFn reads the worker limits for one admission. Production
-	// re-reads dispatch.concurrencyCap and dispatch.repos[].concurrencyCap from the
-	// config file the pass resolved, so a lowered cap applies to the next admission.
-	capacityLimitsFn = func(cfg Config) (capacity.Limits, error) { return capacity.LoadLimits(cfg.Path) }
+	// re-reads the limits from the config file(s) on every admission, so a lowered
+	// cap applies to the next one (loadAdmissionLimits).
+	capacityLimitsFn = loadAdmissionLimits
+	// defaultFleetConfigPathFn resolves the default fleet config path, the one file
+	// babysit always reads its limits from.
+	defaultFleetConfigPathFn = run.DefaultConfigPath
+	// loadLimitsFn reads the limits of one config file.
+	loadLimitsFn = capacity.LoadLimits
 	// capacityInventoryFn reads one tmux socket's window inventory.
 	capacityInventoryFn = tmux.ListCleanupInventory
 	// capacityClock stamps inventory reads.
@@ -62,6 +71,46 @@ func unreadableLedger(ledger capacityLedger, err error) string {
 		path = "(unresolved)"
 	}
 	return fmt.Sprintf(reasonCapacityLedgerUnreadableFmt, path, err)
+}
+
+// loadAdmissionLimits is the production limits source, read at every admission.
+// Babysit always reads the default fleet config, and a supervisor armed by the
+// daemon cannot learn a dispatch process's --config flag, so a pass run on another
+// config admits under the stricter of the two files' limits (capacity.Stricter): an
+// alternate file can never raise dispatch above what babysit enforces. A pass on
+// the default config reads that one file once.
+//
+// A default file that cannot be read or holds invalid limits is an error, returned
+// unwrapped so the reason matches the one babysit records for the same file; an
+// absent one is the default machine cap, and an unresolved default path (no home)
+// is the same error babysit reports. Fail closed: the caller admits nothing.
+func loadAdmissionLimits(cfg Config) (capacity.Limits, error) {
+	limits, err := loadLimitsFn(cfg.Path)
+	if err != nil {
+		return capacity.Limits{}, err
+	}
+	def := defaultFleetConfigPathFn()
+	if def != "" && samePath(cfg.Path, def) {
+		return limits, nil
+	}
+	defLimits, err := loadLimitsFn(def)
+	if err != nil {
+		return capacity.Limits{}, err
+	}
+	return capacity.Stricter(limits, defLimits), nil
+}
+
+// samePath reports whether a and b name one file by their absolute, cleaned
+// spelling. A path that cannot be made absolute (the working directory is gone)
+// compares as it is cleaned; a mismatch only means both files are read.
+func samePath(a, b string) bool {
+	abs := func(p string) string {
+		if v, err := filepath.Abs(p); err == nil {
+			return v
+		}
+		return filepath.Clean(p)
+	}
+	return abs(a) == abs(b)
 }
 
 // -- observation --------------------------------------------------------------
@@ -238,7 +287,7 @@ func (a *admitter) admit(d Decision) (*capacity.Permit, string) {
 	if err != nil {
 		return nil, "capacity launch target unresolved: resolving the launch directory: " + err.Error()
 	}
-	decision, err := a.ledger.Admit(capacity.Request{
+	decision, err := a.admitInFlight(capacity.Request{
 		Kind:   kindOf(d),
 		Repo:   d.Ticket.Repo,
 		Ticket: d.Ticket.Number,
@@ -258,6 +307,18 @@ func (a *admitter) admit(d Decision) (*capacity.Permit, string) {
 		return nil, decision.Reason
 	}
 	return &decision.Permit, ""
+}
+
+// admitInFlight is Admit that also registers the reservation as in flight (see
+// inFlight) before any other pass of this process can look at the ledger.
+func (a *admitter) admitInFlight(req capacity.Request) (capacity.Decision, error) {
+	inFlight.Lock()
+	defer inFlight.Unlock()
+	decision, err := a.ledger.Admit(req)
+	if err == nil && decision.Admitted {
+		inFlight.holders[decision.Permit.HolderID] = struct{}{}
+	}
+	return decision, err
 }
 
 // admitDecisions runs Admit for every decision that would spawn and rewrites each
@@ -300,9 +361,114 @@ func settleOnce(op func() error) error {
 // reservedUntil says when an entry this process could not settle clears. The
 // launcher of the entry is this process, and a `reserved` entry is released only
 // when its launcher is dead, so an inventory alone never frees it while this
-// process runs: a one-shot pass clears it once it has exited, the daemon after a
+// process runs. The next non-dry-run pass of this process retries the settle from
+// the tmux inventory (settleOwnReservations); a pass that cannot read the ledger,
+// or an inventory that cannot say, leaves it, and once the process has exited the
+// first complete inventory with no worker window frees it.
+const reservedUntil = "it stays reserved until the next pass of this process retries the settle from the tmux inventory; once this process has exited the first complete inventory with no worker window frees it, or remove ledger.json after confirming no worker is live"
+
+// inFlight is the set of reservations a pass of this process admitted and has not
+// finished settling (release or confirm). settleOwnReservations skips them: an
+// entry in the set is a launch still under way, not one a failed settle left
+// behind, and the passes of one process are not always sequential (the daemon's
+// combined loop and a test run several at once). The mutex also spans each Admit
+// and its registration, so the self-heal never sees an admitted entry that is not
+// yet in the set.
+var inFlight = struct {
+	sync.Mutex
+	holders map[string]struct{}
+}{holders: map[string]struct{}{}}
+
+// settled ends a pass's hold on a permit, whatever the settle came to: an entry
+// that is still reserved after a failed settle is the self-heal's from now on.
+func settled(permit *capacity.Permit) {
+	inFlight.Lock()
+	defer inFlight.Unlock()
+	delete(inFlight.holders, permit.HolderID)
+}
+
+// settleOwnReservations is the self-heal for a reservation this process could not
+// settle (release or confirm failed twice, see reservedUntil). Such an entry is
+// `reserved` and its launcher is this live process, so the ledger's release rules
+// never free it: no inventory alone can, until the process exits. Left alone it
+// would hold a slot for the process lifetime, which for the daemon is until a
 // restart.
-const reservedUntil = "it stays reserved while this process runs; once the process has exited the first complete inventory with no worker window frees it (the daemon: after a restart), or remove ledger.json after confirming no worker is live"
+//
+// It runs at the start of every non-dry-run pass, before the first Admit. It
+// settles only a reserved dispatch entry (never a babysit repair) launched by this
+// process, by the ledger's own ownership rule (pid and start time, so a reused pid
+// is not this process) and not in flight: when the entry's worker window is in the
+// tmux inventory it is confirmed, when a complete inventory read after the entry
+// last changed shows none (a tmux server that is not running is such an inventory)
+// it is released, and when the inventory cannot say (a socket not read, an
+// incomplete listing, a read before the entry's updatedAt) it is left for a later
+// pass. With no such entry it reads no inventory at all.
+func settleOwnReservations(ledger capacityLedger, out io.Writer) {
+	inFlight.Lock()
+	snap, err := ledger.Peek()
+	if err != nil {
+		inFlight.Unlock()
+		logf(out, "dispatch: capacity: the ledger could not be read to settle earlier reservations (%v)\n", err)
+		return
+	}
+	pid := os.Getpid()
+	var own []capacity.Entry
+	for _, e := range snap.Entries {
+		if e.State != capacity.StateReserved || e.Kind.Repair() {
+			continue
+		}
+		if _, busy := inFlight.holders[e.HolderID]; busy || !ledger.Owns(e, pid) {
+			continue
+		}
+		// Claimed, so a concurrent self-heal of this process cannot settle it too.
+		inFlight.holders[e.HolderID] = struct{}{}
+		own = append(own, e)
+	}
+	inFlight.Unlock()
+	if len(own) == 0 {
+		return
+	}
+	defer func() {
+		inFlight.Lock()
+		defer inFlight.Unlock()
+		for _, e := range own {
+			delete(inFlight.holders, e.HolderID)
+		}
+	}()
+
+	var sockets []string
+	for _, e := range own {
+		if !slices.Contains(sockets, e.Socket) {
+			sockets = append(sockets, e.Socket)
+		}
+	}
+	inv, notes := readCapacityInventory(sockets)
+	for _, note := range notes {
+		logf(out, "dispatch: %s\n", note)
+	}
+	for _, e := range own {
+		permit := capacity.Permit{HolderID: e.HolderID, Kind: e.Kind, Repo: e.Repo, Ticket: e.Ticket, Window: e.Window, State: e.State}
+		switch e.WorkerIn(inv) {
+		case capacity.WorkerAlive:
+			confirmation := capacity.Confirmation{Socket: e.Socket, Window: e.Window, Dir: e.Dir}
+			err := settleOnce(func() error { return ledger.Confirm(permit, confirmation) })
+			switch {
+			case errors.Is(err, capacity.ErrNotHeld):
+				logf(out, "dispatch: capacity: the %s reservation is missing from the ledger (removed or reset); its worker window is running but is not counted by the ledger until the daemon sees it running\n", e.Kind)
+			case err != nil:
+				logf(out, "dispatch: capacity: the %s reservation could not be settled (%v); it stays reserved\n", e.Kind, err)
+			default:
+				logf(out, "dispatch: capacity: confirmed the %s reservation left reserved by an earlier failed settle; its worker window is running\n", e.Kind)
+			}
+		case capacity.WorkerAbsent:
+			if err := settleOnce(func() error { return ledger.Release(permit) }); err != nil {
+				logf(out, "dispatch: capacity: the %s reservation could not be settled (%v); it stays reserved\n", e.Kind, err)
+				continue
+			}
+			logf(out, "dispatch: capacity: released the %s reservation left reserved by an earlier failed settle; no worker window exists\n", e.Kind)
+		}
+	}
+}
 
 // release gives a permit back for a launch that failed before it created any
 // window. A failed release is retried once, then reported with what remains: the
@@ -311,6 +477,7 @@ func (a *admitter) release(permit *capacity.Permit, number int) {
 	if permit == nil {
 		return
 	}
+	defer settled(permit)
 	if err := settleOnce(func() error { return a.ledger.Release(*permit) }); err != nil {
 		logf(a.out, "dispatch: #%d capacity reservation could not be released (%v); %s\n", number, err, reservedUntil)
 	}
@@ -327,6 +494,7 @@ func (a *admitter) confirm(permit *capacity.Permit, d Decision) {
 	if permit == nil {
 		return
 	}
+	defer settled(permit)
 	number := d.Ticket.Number
 	dir, err := launchDir(a.dirByRepo[d.Ticket.Repo])
 	if err == nil {

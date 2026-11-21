@@ -713,6 +713,184 @@ func TestRepairAdmission_ARestartedSupervisorAdoptsItsOwnHeldEntry(t *testing.T)
 	}
 }
 
+// ---- #1578 item 3: a refused launch restores an adopted entry, never deletes it ----
+
+const noSessionRecorded = "no tmux session was recorded"
+
+// A `reserved` predecessor of a dead supervisor is adopted by the next
+// supervisor's admission. When launch() refuses before `cenci run`, the entry
+// goes back to the predecessor's launcher, still reserved, so a later complete
+// inventory releases it through the ordinary release rules.
+func TestRepairAdmission_AnAdoptedReservedEntryStaysReservedWhenTheLaunchIsRefused(t *testing.T) {
+	h := newCapHarness(t, 1)
+	h.admitAs(capDeadLauncher, capacity.Request{Kind: capacity.KindCIRepair, Repo: capRepo, Ticket: 42, Branch: "feature", Socket: capDefaultSocket, Window: "42-ci-repair", Dir: capRepoDir})
+	// The inventory of the entry's socket cannot be read, so the entry is neither
+	// proven gone nor freed before the adoption.
+	h.invErr[capDefaultSocket] = errors.New("tmux: timed out")
+	original := h.entries()[0]
+	s := ciRepairSeedState()
+	s.LaunchSession = ""
+
+	calls, _, err := h.tickErr(&s, ciRepairTickResponses("sha-new"))
+
+	if err == nil || !strings.Contains(err.Error(), noSessionRecorded) {
+		t.Fatalf("tick err = %v, want launch()'s %q refusal", err, noSessionRecorded)
+	}
+	if n := countWorkflowLaunches(calls, "ci-repair"); n != 0 {
+		t.Errorf("cenci run ci-repair calls = %d, want 0", n)
+	}
+	got := h.entries()
+	if len(got) != 1 {
+		t.Fatalf("ledger entries = %+v, want the adopted entry kept", got)
+	}
+	if got[0].HolderID != original.HolderID || got[0].State != capacity.StateReserved ||
+		got[0].LauncherPID != capDeadLauncher || got[0].LauncherStart != original.LauncherStart {
+		t.Errorf("entry = %+v, want %s still reserved with the predecessor's launcher %d %q", got[0], original.HolderID, capDeadLauncher, original.LauncherStart)
+	}
+
+	// A later complete inventory with no matching window releases it.
+	delete(h.invErr, capDefaultSocket)
+	quiet := quietState()
+	h.tick(&quiet, quietResponses())
+	if got := h.entries(); len(got) != 0 {
+		t.Errorf("ledger entries = %+v after a complete inventory with no worker window, want the restored entry released", got)
+	}
+}
+
+// A launch that fails before `cenci run` with a fresh reservation (no predecessor
+// entry was adopted) still gives its slot back.
+func TestRepairAdmission_ARefusedLaunchOfAFreshReservationIsStillReleased(t *testing.T) {
+	h := newCapHarness(t, 3)
+	s := ciRepairSeedState()
+	s.LaunchSession = ""
+
+	calls, _, err := h.tickErr(&s, ciRepairTickResponses("sha-new"))
+
+	if err == nil || !strings.Contains(err.Error(), noSessionRecorded) {
+		t.Fatalf("tick err = %v, want launch()'s %q refusal", err, noSessionRecorded)
+	}
+	if n := countWorkflowLaunches(calls, "ci-repair"); n != 0 {
+		t.Errorf("cenci run ci-repair calls = %d, want 0", n)
+	}
+	if got := h.entries(); len(got) != 0 {
+		t.Errorf("ledger entries = %+v, want the fresh reservation released", got)
+	}
+}
+
+// An adopted entry that is gone by the time the launch is refused (ledger.json
+// deleted by hand) is reported as missing and nothing is created for it.
+func TestSettlePermit_AnAdoptedEntryRemovedBeforeTheRestoreIsReportedMissing(t *testing.T) {
+	h := newCapHarness(t, 3)
+	h.admitAs(capDeadLauncher, capacity.Request{Kind: capacity.KindCIRepair, Repo: capRepo, Ticket: 42, Branch: "feature", Socket: capDefaultSocket, Window: "42-ci-repair", Dir: capRepoDir})
+	d, err := h.ledger.Admit(capacity.Request{
+		Kind: capacity.KindCIRepair, Repo: capRepo, Ticket: 42, Branch: "feature", Socket: capDefaultSocket, Window: "42-ci-repair", Dir: capRepoDir,
+		Adopt: true, Limits: capacity.Limits{Machine: 3},
+	})
+	if err != nil || !d.Admitted || !d.Permit.Adopted {
+		t.Fatalf("adoption: decision %+v, err %v, want an adopted permit", d, err)
+	}
+	if err := os.Remove(filepath.Join(h.dir, "ledger.json")); err != nil {
+		t.Fatal(err)
+	}
+	s := settleState(false)
+
+	restore := captureStdout(t)
+	settlePermit(&s, "ci-repair", &d.Permit, false)
+	out := restore()
+
+	if !strings.Contains(out, "capacity reservation is missing from the ledger") {
+		t.Errorf("stdout = %q, want the existing missing-reservation line", out)
+	}
+	if got := h.entries(); len(got) != 0 {
+		t.Errorf("ledger entries = %+v, want none: a restore creates nothing", got)
+	}
+}
+
+// restoreFailsLedger is the real ledger whose Restore always fails with err.
+type restoreFailsLedger struct {
+	ledgerHandle
+	err error
+}
+
+func (l restoreFailsLedger) Restore(capacity.Permit) error { return l.err }
+
+// A Restore that fails for good leaves the adopted entry reserved under this
+// supervisor and says so, like a failed release.
+func TestSettlePermit_AFailedRestoreIsReportedAndLeavesTheEntryReserved(t *testing.T) {
+	h := newCapHarness(t, 3)
+	h.admitAs(capDeadLauncher, capacity.Request{Kind: capacity.KindCIRepair, Repo: capRepo, Ticket: 42, Branch: "feature", Socket: capDefaultSocket, Window: "42-ci-repair", Dir: capRepoDir})
+	d, err := h.ledger.Admit(capacity.Request{
+		Kind: capacity.KindCIRepair, Repo: capRepo, Ticket: 42, Branch: "feature", Socket: capDefaultSocket, Window: "42-ci-repair", Dir: capRepoDir,
+		Adopt: true, Limits: capacity.Limits{Machine: 3},
+	})
+	if err != nil || !d.Admitted || !d.Permit.Adopted {
+		t.Fatalf("adoption: decision %+v, err %v, want an adopted permit", d, err)
+	}
+	h.handle = restoreFailsLedger{ledgerHandle: h.ledger, err: capacity.ErrIO}
+	s := settleState(false)
+
+	restore := captureStdout(t)
+	settlePermit(&s, "ci-repair", &d.Permit, false)
+	out := restore()
+
+	if !strings.Contains(out, "capacity reservation could not be restored") || !strings.Contains(out, "stays reserved while this supervisor runs") {
+		t.Errorf("stdout = %q, want the failed restore saying the entry stays reserved while this supervisor runs", out)
+	}
+	if got := h.entries(); len(got) != 1 || got[0].State != capacity.StateReserved || got[0].LauncherPID != os.Getpid() {
+		t.Errorf("ledger entries = %+v, want the adopted entry left reserved under this supervisor", got)
+	}
+}
+
+// ---- #1578 item 4: the wait record names its supervisor ----------------------
+
+func TestRepairAdmission_TheCapacityWaitCarriesTheSupervisorsOwnerAndSurvivesWhileItLives(t *testing.T) {
+	h := newCapHarness(t, 1)
+	h.seedImplement(1)
+	c := repairCaseByName(t, "ci-repair")
+	s := c.state
+
+	h.tick(&s, c.responses)
+	first := h.waits()
+	if len(first) != 1 {
+		t.Fatalf("waits = %+v, want one wait record", first)
+	}
+	wantStart, _ := h.probe(os.Getpid())
+	if first[0].OwnerPID != os.Getpid() || first[0].OwnerStart != wantStart || first[0].OwnerPID == 0 {
+		t.Errorf("wait owner = %d %q, want this supervisor %d %q", first[0].OwnerPID, first[0].OwnerStart, os.Getpid(), wantStart)
+	}
+
+	// A quiet tick of another PR reconciles the ledger; the owner is alive, so the
+	// wait stays.
+	quiet := quietState()
+	quiet.PR = "43"
+	h.tick(&quiet, quietResponses())
+	if got := h.waits(); len(got) != 1 || got[0].OwnerPID != os.Getpid() {
+		t.Errorf("waits = %+v after a tick, want the wait of the live owner kept", got)
+	}
+}
+
+func TestRepairAdmission_AWaitOfAKilledSupervisorIsDroppedByTheNextTick(t *testing.T) {
+	h := newCapHarness(t, 1)
+	h.seedImplement(1)
+	killed := capacity.NewLedger(h.dir, capacity.Options{Now: h.now, Probe: h.probe, LockTimeout: 200 * time.Millisecond, PID: func() int { return capDeadLauncher }})
+	h.handle = killed
+	c := repairCaseByName(t, "ci-repair")
+	s := c.state
+	h.tick(&s, c.responses)
+	if got := h.waits(); len(got) != 1 || got[0].OwnerPID != capDeadLauncher {
+		t.Fatalf("waits = %+v, want one wait owned by the killed supervisor %d", got, capDeadLauncher)
+	}
+
+	h.handle = h.ledger
+	quiet := quietState()
+	quiet.PR = "43"
+	h.tick(&quiet, quietResponses())
+
+	if got := h.waits(); len(got) != 0 {
+		t.Errorf("waits = %+v, want the wait of the dead owner dropped well before it expires", got)
+	}
+}
+
 // ---- AC80 / edge cases 109, 110: the wait record's lifecycle ----------------
 
 func TestRepairAdmission_AWaitIsRefreshedEachTickAndExpiresAfterThreePollIntervals(t *testing.T) {

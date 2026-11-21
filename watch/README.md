@@ -1175,10 +1175,27 @@ fan-out, not by this cap.
   `dispatch.repos[].concurrencyCap` from the config file, so an edit applies to the next
   admission. A repo cap above the machine cap is clamped to it. Machine cap `0` pauses
   dispatch and babysit repairs. Lowering a cap never kills a worker: nothing is admitted
-  until used slots drop below the new cap.
+  until used slots drop below the new cap. Babysit always reads the default fleet config
+  (`$XDG_CONFIG_HOME/cenci/config.json`), and a supervisor the daemon armed cannot learn a
+  dispatch process's `--config` flag, so a dispatch process whose config path is not the
+  default admits under the **stricter of both files**: the lower machine cap, and per repo
+  the lower cap, where a cap present in only one file applies as it stands (a pause, `0`, in
+  either file wins). An alternate file can therefore never raise dispatch above what babysit
+  enforces. The default file is read at every admission too: an absent one is the default
+  machine cap (3), and an unreadable or invalid one refuses every admission with `capacity
+  limits unreadable: <reason>`, the reason babysit records for the same file. A `--config`
+  that names the default path reads that one file once. Documented residual: a repo cap set
+  only in the alternate file binds that dispatch process's launches but not babysit's
+  repairs, because babysit reads only the default path.
 - **Priority.** A babysit repair that finds the host full records a wait, which holds no
   slot and expires after 3 of its poll intervals unless refreshed. Dispatch admits only when
-  free slots exceed the live waits; a repair needs one free slot.
+  free slots exceed the live waits; a repair needs one free slot. A wait records its owner,
+  the process that wrote or last refreshed it (`ownerPid`, `ownerStart`), so a supervisor
+  killed without cleaning up does not keep one slot free until the wait expires: a wait
+  whose owner process is dead, or whose pid now has a different start time (a reused pid),
+  is dropped by the next `Admit`, `Reconcile` or `Wait`. Where the start time cannot be
+  read, a wait is dropped only when its owner pid is not alive. A wait written by schema 1
+  has no owner and expires by time alone.
 - **Branch writer.** Inside the same locked section, a dispatch launch is refused with
   `branch writer active` when a babysit repair holds the ticket's recorded pipeline branch,
   and a babysit repair is deferred with the same reason when a dispatch worker holds the
@@ -1196,24 +1213,43 @@ fan-out, not by this cap.
   automatically. When one entry or wait is malformed the error names its position (counted
   from 1) and the failing check, never a value (`a capacity file is corrupt: entry 3:
   launcher pid out of range`), so the entry to fix by hand is easy to find.
+  `ledger.json` is schema 2 (a wait record carries `ownerPid` and `ownerStart`). A schema 1
+  file is read as it is, its waits kept with time-only expiry, and the next write stores it
+  as schema 2; any other schema is unreadable. After an upgrade, an older binary (a daemon
+  or a babysit supervisor started before it) reads the schema 2 ledger as unreadable and
+  admits nothing until it is upgraded or restarted: the file needs no repair.
   Manual recovery: confirm no workers are live (`cenci dispatch status`, `tmux list-windows`
   on the dispatch session), then remove `ledger.json` from the capacity directory by hand.
   Removing it while workers are live forgets their reservations, so the cap can be exceeded
   until they exit (a worker the daemon sees as running still counts). A `Release` or `Confirm`
   write that failed with a transient error (a busy lock, a brief I/O failure) is retried
   once, then logged; if it still fails the entry stays `reserved` (conservative) and holds
-  its slot. A `Confirm` whose entry is gone says the entry is missing from the ledger
-  (removed or reset): the worker is live but counted only while the daemon sees it running.
-  A `reserved` entry is freed only when its launcher process is dead, and the launcher is
-  the process that made it (the dispatch pass, or the babysit supervisor), so an inventory
-  alone never frees it while that process runs: it clears on the first complete inventory
-  with no worker window after the process has exited (for the daemon, after a restart), or by
-  the same manual removal. A babysit supervisor also settles its own stranded entry on its
-  next tick (a running worker window confirms it, a complete inventory with none releases
-  it), so it does not keep a slot for a worker a complete inventory shows is gone.
+  its slot until the next pass or tick of that process retries it (below). A `Confirm` whose
+  entry is gone says the entry is missing from the ledger (removed or reset): the worker is
+  live but counted only while the daemon sees it running.
+  A `reserved` entry is freed by an inventory only when its launcher process is dead, and
+  the launcher is the process that made it (the dispatch pass, or the babysit supervisor),
+  so an inventory alone never frees it while that process runs. Each launcher therefore
+  heals its own failed settles. Dispatch does it at the start of every non-dry-run pass (the
+  daemon's combined loop, `cenci dispatch loop` and `cenci dispatch --once`), before the
+  pass's first admission: from one tmux inventory it confirms each `reserved` dispatch entry
+  this process launched whose worker window is running (`dispatch: capacity: confirmed the
+  <kind> reservation left reserved by an earlier failed settle; its worker window is
+  running`) and releases one a complete inventory, read after the entry last changed, shows
+  has no worker window (`dispatch: capacity: released the <kind> reservation left reserved
+  by an earlier failed settle; no worker window exists`; a tmux server that is not running is
+  such an inventory). An inventory that cannot say (a socket not read, an incomplete
+  listing) leaves the entry for a later pass, and a babysit repair's entry, another live
+  process's entry and a launch still in flight in this process are never touched. A pass
+  with no such entry reads no tmux inventory, and a dry run writes nothing. A babysit
+  supervisor settles its own stranded entry the same way on its next tick (a running worker
+  window confirms it, a complete inventory with none releases it). Once the launcher process
+  has exited (for the daemon, after a restart), the first complete inventory with no worker
+  window frees an entry nobody retried; the same manual removal applies.
 - **Status.** `cenci dispatch status` prints `capacity: <used>/<total> slots` and, for each
   repo with a `concurrencyCap`, `capacity <owner/repo>: <used>/<cap> slots` (the effective
-  cap, the lower of the repo's and the machine's). It reads without a lock and creates no
+  cap, the lower of the repo's and the machine's; under `--config <alt>` both come from the
+  stricter-of-both limits above). It reads without a lock and creates no
   ledger file; when the daemon snapshot, the orphan count, the limits or the ledger cannot
   be read, the count is `?` and the concrete reason follows in parentheses
   (`capacity: ?/3 slots (capacity observation unavailable: daemon snapshot)`). It always

@@ -27,6 +27,10 @@ type ledgerHandle interface {
 	// Owns reports whether an entry was launched by the live process pid, by the
 	// rule the ledger's own adoption uses (pid and start time).
 	Owns(e capacity.Entry, pid int) bool
+	// Restore hands an adopted entry back to its pre-adoption state for a launch
+	// refused before `cenci run`. It is not on capacity.Admission: only this
+	// launcher family adopts entries.
+	Restore(p capacity.Permit) error
 }
 
 // The seams below are package variables, like command/execGh/tmuxPaneInventory,
@@ -457,7 +461,7 @@ func dropCapacityWait(s *State) {
 	}
 }
 
-// settleOnce runs one Release or Confirm with the one bounded retry dispatch has
+// settleOnce runs one Release, Restore or Confirm with the one bounded retry dispatch has
 // (capacity.RetryTransient): a transient failure (the store busy or briefly
 // unreadable) is retried once after settleRetryPause, a permanent one is not.
 func settleOnce(op func() error) error {
@@ -487,21 +491,32 @@ func reservedWhileRunning(err error) string {
 }
 
 // settlePermit applies the outcome rule once launch() is done with a permit. A
-// launch that failed before `cenci run` ran created nothing, so the slot is
-// released. Once `cenci run` has run, whatever its exit status, a window may exist
+// launch that failed before `cenci run` ran created nothing, so a fresh
+// reservation's slot is released. An adopted permit is not fresh: its entry is a
+// dead predecessor's, possibly confirmed with a live worker, so it is restored to
+// its pre-adoption state and never deleted; only the ordinary release rules free
+// it later. Once `cenci run` has run, whatever its exit status, a window may exist
 // (exit 3 means it does), so the reservation is confirmed to the deterministic
 // window name and only a later complete inventory that shows no such window
-// releases it. A Release or Confirm that fails transiently is retried once; one
-// that still fails leaves the entry reserved, which the next tick's self-heal
-// (settleOwnReservations) settles.
+// releases it. A Release, Restore or Confirm that fails transiently is retried
+// once; one that still fails leaves the entry reserved under this supervisor,
+// which the next tick's self-heal (settleOwnReservations) settles.
 func settlePermit(s *State, workflow string, permit *capacity.Permit, ran bool) {
 	if permit == nil {
 		return
 	}
 	ledger := capacityLedgerFn()
 	if !ran {
-		if err := settleOnce(func() error { return ledger.Release(*permit) }); err != nil {
-			fmt.Printf("PR #%s: the %s capacity reservation could not be released (%v); %s\n", s.PR, workflow, err, reservedWhileRunning(err))
+		verb, op := "released", func() error { return ledger.Release(*permit) }
+		if permit.Adopted {
+			verb, op = "restored", func() error { return ledger.Restore(*permit) }
+		}
+		err := settleOnce(op)
+		switch {
+		case permit.Adopted && errors.Is(err, capacity.ErrNotHeld):
+			fmt.Printf("PR #%s: %s\n", s.PR, missingReservation(workflow))
+		case err != nil:
+			fmt.Printf("PR #%s: the %s capacity reservation could not be %s (%v); %s\n", s.PR, workflow, verb, err, reservedWhileRunning(err))
 		}
 		return
 	}
@@ -518,10 +533,16 @@ func settlePermit(s *State, workflow string, permit *capacity.Permit, ran bool) 
 	case errors.Is(err, capacity.ErrNotHeld):
 		// A reserved entry whose launcher is alive is never freed by an inventory, so
 		// the entry is missing because ledger.json was removed, reset or replaced.
-		fmt.Printf("PR #%s: the %s capacity reservation is missing from the ledger (removed or reset); the worker, if one was started, is not counted by the ledger until the daemon sees it running\n", s.PR, workflow)
+		fmt.Printf("PR #%s: %s\n", s.PR, missingReservation(workflow))
 	case err != nil:
 		fmt.Printf("PR #%s: the %s capacity reservation could not be confirmed (%v); %s\n", s.PR, workflow, err, reservedWhileRunning(err))
 	}
+}
+
+// missingReservation is the line for a reservation that is no longer in the ledger
+// when settlePermit comes to settle it (the PR prefix is the caller's).
+func missingReservation(workflow string) string {
+	return fmt.Sprintf("the %s capacity reservation is missing from the ledger (removed or reset); the worker, if one was started, is not counted by the ledger until the daemon sees it running", workflow)
 }
 
 // repairWorkerLive is State.RepairWorkerLive for one tick. A tick that probed the
