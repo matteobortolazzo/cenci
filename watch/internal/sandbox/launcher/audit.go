@@ -300,6 +300,7 @@ type Posture struct {
 
 	Mounts             []MountPosture      `json:"mounts"`
 	HostContent        *HostContentPosture `json:"hostContent,omitempty"`
+	Preferences        *PreferencePosture  `json:"preferences,omitempty"`
 	Volumes            []VolumePosture     `json:"volumes"`
 	Env                []EnvVarName        `json:"env"`
 	ForwardedEnv       []ForwardedEnvVar   `json:"forwardedEnv"`
@@ -454,6 +455,9 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 	allEnvArgs = append(allEnvArgs, envArgs...)
 
 	planned := buildPlannedPosture(agent, scope, home, opts, dindOn, dindDegraded, mounts, allEnvArgs, featureArgs, stagedKinds, secrets)
+	if profile.preferences.Source != "" {
+		planned.Preferences = &profile.preferences.PreferencePosture
+	}
 	if len(profile.Mounts) > 0 {
 		planned.HostContent = &HostContentPosture{Configured: profile.Mounts, Status: "planned"}
 	}
@@ -492,6 +496,14 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 		// failure or basis:"running".
 		planned.InspectWarning = fmt.Sprintf("the running container's actual posture could not be verified (%v); showing the planned posture only, not the running container's actual state", err)
 		return planned, nil
+	}
+	if planned.Preferences != nil {
+		observed.Preferences = planned.Preferences
+		if observed.HostContent != nil && observed.HostContent.Status == "recreate" {
+			observed.Preferences.Status = "container requires recreation"
+		} else {
+			e.readPreferenceReport(scope.ContainerName, agent, observed.Preferences)
+		}
 	}
 	return observed, nil
 }
@@ -1024,6 +1036,7 @@ func (p Posture) WriteText(w io.Writer) error {
 	}
 
 	p.HostContent.writeText(bw)
+	p.Preferences.writeText(bw)
 	_, _ = fmt.Fprintln(bw, "\nVolumes:")
 	if len(p.Volumes) == 0 {
 		_, _ = fmt.Fprintln(bw, "  (none)")

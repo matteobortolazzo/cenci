@@ -347,6 +347,9 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 	if err := profile.rejectWritableOverlaps(addDirs); err != nil {
 		return launchCtx{}, err
 	}
+	if profile.preferences.Source != "" && opts.Model == "" {
+		model = ""
+	}
 
 	if e.Runtime == "" {
 		if dindOn {
@@ -601,7 +604,7 @@ func (e *Engine) Launch(opts Options) error {
 			}
 		}
 		e.warnDockerdStartupFailure(ctx)
-		if err := e.activateHostContent(ctx); err != nil {
+		if err := e.activateHostProfile(ctx); err != nil {
 			return err
 		}
 		if ctx.Agent == "codex" && !opts.Shell {
@@ -676,7 +679,7 @@ func (e *Engine) Launch(opts Options) error {
 		return err
 	}
 	e.warnDockerdStartupFailure(ctx)
-	if err := e.activateHostContent(ctx); err != nil {
+	if err := e.activateHostProfile(ctx); err != nil {
 		return err
 	}
 	execEnvArgs = append(execEnvArgs, e.tagLaunchPane(ctx.Scope.ContainerName)...)
@@ -698,9 +701,10 @@ func (e *Engine) Launch(opts Options) error {
 // they go through agentCmdArgsFor, which adds the --add-dir tokens, so the two
 // can never drift.
 func buildAgentCmdArgs(agent, model string) []string {
+	var args []string
 	switch agent {
 	case "codex":
-		return []string{"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--model", model}
+		args = []string{"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"}
 	case "opencode":
 		// No --dangerously-skip-permissions equivalent exists for OpenCode:
 		// permissions are config-driven via the seeded opencode.json
@@ -711,8 +715,12 @@ func buildAgentCmdArgs(agent, model string) []string {
 		}
 		return nil
 	default:
-		return []string{"--dangerously-skip-permissions", "--model", model}
+		args = []string{"--dangerously-skip-permissions"}
 	}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	return args
 }
 
 // agentCmdArgsFor is the one place the agent's command-line flags for a launch

@@ -90,7 +90,7 @@ jobs:
         # proven here instead of silently skipped (#645).
         run: |
           sudo apt-get update
-          sudo apt-get install -y tmux
+          sudo apt-get install -y tmux python3-tomlkit
           tmux -V
       - name: Run host-runnable test suites
         run: |

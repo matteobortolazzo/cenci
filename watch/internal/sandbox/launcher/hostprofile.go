@@ -36,6 +36,7 @@ type hostProfile struct {
 	Mounts          []MountPosture    `json:"-"`
 	ContentIdentity string            `json:"-"`
 	configPath      string
+	preferences     hostPreferences
 }
 
 func resolveHostProfile(agent string, scope Scope, home string) (hostProfile, error) {
@@ -108,6 +109,9 @@ func resolveHostProfile(agent string, scope Scope, home string) (hostProfile, er
 	}
 	profile.Authorized = true
 	err = profile.resolveContent(agent, scope, home)
+	if err == nil {
+		profile.preferences, err = resolvePreferences(profile.Preferences, agent, scope, home)
+	}
 	return profile, err
 }
 

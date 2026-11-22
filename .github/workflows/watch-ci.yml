@@ -76,6 +76,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.x'
+      - run: sudo apt-get update && sudo apt-get install -y python3-tomlkit
       - run: go test ./...
       - name: Verify dependency cache survives startup-script updates
         run: go test ./internal/sandbox/launcher -run '^TestBuildCacheContainer$' -v -count=1
