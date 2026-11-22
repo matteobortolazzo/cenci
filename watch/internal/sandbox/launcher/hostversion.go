@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -20,6 +21,14 @@ type hostVersionPolicy struct {
 	Mode       string `json:"mode"`
 	Executable string `json:"executable"`
 	configPath string
+}
+
+var versionAccountHome = func() (string, error) {
+	account, err := user.Current()
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve OS account home: %w", err)
+	}
+	return account.HomeDir, nil
 }
 
 func globalHostVersionPolicy(agent string) (hostVersionPolicy, error) {
@@ -58,7 +67,7 @@ func (p hostProfile) versionPolicy() (hostVersionPolicy, error) {
 	default:
 		return policy, errors.New("sandboxHostProfiles version.mode must be managed or follow-host")
 	}
-	policy.configPath = p.configPath
+	policy.configPath = p.versionConfigPath
 	return policy, nil
 }
 
@@ -96,11 +105,14 @@ func checkHostVersionPath(path string) error {
 }
 
 // Error on overflow rather than retaining or printing arbitrary wrapper output.
-type versionOutput struct{ buf bytes.Buffer }
+type versionOutput struct {
+	buf bytes.Buffer
+	max int
+}
 
 func (b *versionOutput) Write(data []byte) (int, error) {
-	if len(data) > 1024-b.buf.Len() {
-		return 0, errors.New("host version output exceeds 1 KiB")
+	if len(data) > b.max-b.buf.Len() {
+		return 0, errors.New("version probe output too large")
 	}
 	return b.buf.Write(data)
 }
@@ -109,28 +121,26 @@ func (p hostVersionPolicy) probe(agent string, e *Engine) (string, error) {
 	if filepath.Base(p.Executable) != agent {
 		return "", fmt.Errorf("configured host executable must be named %q", agent)
 	}
-	path, err := filepath.EvalSymlinks(p.Executable)
-	if err != nil {
-		return "", err
-	}
-	for _, candidate := range []string{p.configPath, p.Executable, path} {
+	for _, candidate := range []string{p.configPath, p.Executable} {
 		if err := checkHostVersionPath(candidate); err != nil {
 			return "", err
 		}
 	}
-	info, err := os.Stat(path)
+	path, err := hostNativeClient(agent, p.Executable)
 	if err != nil {
 		return "", err
-	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
-		return "", errors.New("configured host client is not an executable regular file")
 	}
 	// The active engine must confirm that running workloads cannot replace the
 	// policy or executable. Read-only planning without a runtime never executes it.
 	if e.Runtime == "" {
 		return "", errors.New("runtime unavailable to check host program exposure")
 	}
-	if err := e.checkWritableSandboxBinds(p.rejectWritableBind); err != nil {
+	if err := e.checkWritableSandboxBinds(func(source, name string) error {
+		if identityContains(source, path) {
+			return fmt.Errorf("native host client %q is writable by %s", path, name)
+		}
+		return p.rejectWritableBind(source, name)
+	}); err != nil {
 		return "", err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -139,7 +149,7 @@ func (p hostVersionPolicy) probe(agent string, e *Engine) (string, error) {
 	cmd.Dir = "/"
 	cmd.Env = []string{"HOME=/", "PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin", "LC_ALL=C"}
 	cmd.WaitDelay = 100 * time.Millisecond
-	var out versionOutput
+	out := versionOutput{max: 1024}
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
@@ -172,6 +182,14 @@ func (p hostVersionPolicy) rejectWritableBind(source, name string) error {
 	paths := []string{p.configPath, p.Executable}
 	if path, err := filepath.EvalSymlinks(p.Executable); err == nil {
 		paths = append(paths, path)
+		// For the npm dispatcher, protect the platform package as well. This
+		// also rejects new writable mounts before its payload is installed.
+		if strings.HasSuffix(path, "/node_modules/@openai/codex/bin/codex.js") {
+			root := filepath.Dir(filepath.Dir(filepath.Dir(path)))
+			if identityContains(root, source) || identityContains(source, root) {
+				return fmt.Errorf("host Codex installation %q overlaps a writable bind by %s", root, name)
+			}
+		}
 	}
 	for _, path := range paths {
 		if identityContains(source, path) {

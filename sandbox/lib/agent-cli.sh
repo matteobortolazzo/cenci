@@ -163,7 +163,7 @@ agent_cli_cleanup_versions() {
 
 install_agent_cli_unlocked() {
     local agent="${1:-}" requested="${2:-}" skip_if_pinned="${3:-0}" package label root resolved version integrity metadata
-    local staging release current_target executable lock_integrity pin_value current_version
+    local staging release executable lock_integrity pin_value current_version
     local follow_host="${4:-0}"
     package="$(agent_cli_package "${agent}")" || return $?
     label="$(agent_cli_label "${agent}")" || return $?
@@ -189,6 +189,16 @@ install_agent_cli_unlocked() {
             printf 'Shared %s already at %s; nothing to install.\n' "${label}" "${requested}"
             return 0
         fi
+        # The marker is written only after the verified executable reports
+        # the exact version. Workloads have read-only access to this store.
+        for release in "${root}/versions/${requested}-"*; do
+            if [[ -x "${release}/node_modules/.bin/${agent}" && -f "${release}/.host-version-verified" &&
+                "$(agent_cli_read_fact "${release}/VERSION")" == "${requested}" ]]; then
+                activate_agent_cli_release "${root}" "${release}" "${label}" "${agent}" || return 1
+                printf 'Reactivated verified %s %s from the shared volume.\n' "${label}" "${requested}"
+                return 0
+            fi
+        done
     fi
 
     # Pin gate: evaluated first -- before any mkdir, any stamp, any npm
@@ -310,6 +320,7 @@ install_agent_cli_unlocked() {
             return 1
             ;;
         esac
+        touch -- "${staging}/.host-version-verified" || return 1
     fi
 
     printf '%s\n' "${version}" >"${staging}/VERSION" || {
@@ -340,6 +351,28 @@ install_agent_cli_unlocked() {
     fi
     trap - EXIT HUP INT TERM
 
+    activate_agent_cli_release "${root}" "${release}" "${label}" "${agent}" || return 1
+
+    if [[ -n "${requested}" && "${follow_host}" == 0 ]]; then
+        agent_cli_write_atomic "${root}/PIN" "${version}" || {
+            printf 'agent-cli: failed to write %s/PIN.\n' "${root}" >&2
+            return 1
+        }
+    fi
+
+    # A new host-following launch may share this cache with still-running
+    # processes from several older releases that load files on demand.
+    if [[ "${follow_host}" == 0 ]]; then
+        agent_cli_cleanup_versions "${root}"
+    fi
+    agent_cli_stamp "${root}" ".last-success" \
+        || printf 'agent-cli: warning: failed to record %s/.last-success.\n' "${root}" >&2
+    printf 'Activated %s %s. Running sandboxes keep using the version they started with —\n' "${label}" "${version}"
+    printf 'relaunch them to pick up this update.\n'
+}
+
+activate_agent_cli_release() {
+    local root="$1" release="$2" label="$3" agent="$4" current_target
     current_target="$(readlink "${root}/current" 2>/dev/null || true)"
     if [[ -n "${current_target}" ]]; then
         rm -f -- "${root}/.previous-$$"
@@ -370,26 +403,6 @@ install_agent_cli_unlocked() {
         return 1
     fi
 
-    # PIN is only written for an explicit version, on the same success path
-    # as the short-circuit's PIN write above. A write failure here is loud
-    # (return 1) because the activation itself already succeeded and the
-    # caller's requested pin would otherwise be silently dropped.
-    if [[ -n "${requested}" && "${follow_host}" == 0 ]]; then
-        agent_cli_write_atomic "${root}/PIN" "${version}" || {
-            printf 'agent-cli: failed to write %s/PIN.\n' "${root}" >&2
-            return 1
-        }
-    fi
-
-    # A new host-following launch may share this cache with still-running
-    # processes from several older releases that load files on demand.
-    if [[ "${follow_host}" == 0 ]]; then
-        agent_cli_cleanup_versions "${root}"
-    fi
-    agent_cli_stamp "${root}" ".last-success" \
-        || printf 'agent-cli: warning: failed to record %s/.last-success.\n' "${root}" >&2
-    printf 'Activated %s %s. Running sandboxes keep using the version they started with —\n' "${label}" "${version}"
-    printf 'relaunch them to pick up this update.\n'
 }
 
 update_agent_cli() {

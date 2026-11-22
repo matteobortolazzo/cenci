@@ -128,7 +128,7 @@ func runSandboxBuild(args []string) {
 // following plain update re-refuse. --unpin follows the same owner
 // resolution as the bare form (bootstrapping in the preferred runtime only
 // when the volume exists nowhere) and cannot be combined with --version
-// (unpinning updates to latest; --version would instead re-pin).
+// (unpinning resumes the configured policy; --version would instead re-pin).
 //
 // --all sweeps every agent in sandbox.SupportedAgents across every runtime
 // that already owns that agent's volume, passing --skip-if-pinned so a
@@ -146,8 +146,8 @@ func runSandboxBuild(args []string) {
 func runSandboxUpdateAgent(args []string) {
 	fs := flag.NewFlagSet("sandbox update-agent", flag.ExitOnError)
 	agent := fs.String("agent", "claude", "agent CLI to update (claude or codex; OpenCode is temporarily disabled)")
-	version := fs.String("version", "", "exact semantic version (default: official latest)")
-	unpin := fs.Bool("unpin", false, "clear the shared volume's version pin (if any), then update to latest")
+	version := fs.String("version", "", "exact semantic version to pin (default: configured update policy)")
+	unpin := fs.Bool("unpin", false, "clear the shared volume's version pin (if any), then resume its configured policy")
 	all := fs.Bool("all", false, "refresh every existing agent-CLI volume across every installed runtime, leaving pinned volumes untouched")
 	_ = fs.Parse(args)
 	rejectExtraArgs("update-agent", fs)
@@ -173,7 +173,7 @@ func runSandboxUpdateAgent(args []string) {
 		return
 	}
 	if *unpin && versionSet {
-		fmt.Fprintln(os.Stderr, "cenci sandbox update-agent: --unpin clears the pin and updates to latest, and cannot be combined with --version")
+		fmt.Fprintln(os.Stderr, "cenci sandbox update-agent: --unpin clears the pin and resumes the configured update policy, and cannot be combined with --version")
 		os.Exit(2)
 	}
 

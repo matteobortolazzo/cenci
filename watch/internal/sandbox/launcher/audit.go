@@ -285,6 +285,7 @@ type BoundaryWeakening struct {
 // only names, sources, and mount/staging status (see EnvVarName/
 // ForwardedEnvVar/CredentialSource's doc comments).
 type Posture struct {
+	AgentVersion *AgentVersionPosture `json:"agentVersion,omitempty"`
 	// Basis is the running/planned discriminator (ticket #627): see the
 	// PostureBasis* consts. Always exactly "running" or "planned" — never
 	// omitted, never a third value.
@@ -455,6 +456,20 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 	allEnvArgs = append(allEnvArgs, envArgs...)
 
 	planned := buildPlannedPosture(agent, scope, home, opts, dindOn, dindDegraded, mounts, allEnvArgs, featureArgs, stagedKinds, secrets)
+	version, err := profile.versionPolicy()
+	if err != nil {
+		return Posture{}, err
+	}
+	// A planned audit cannot inspect a stopped workload's store. A running
+	// audit reads it after the container's actual mounts are established.
+	deferVersionReport := func(p Posture) Posture {
+		name := ""
+		if p.Basis == PostureBasisRunning {
+			name = scope.ContainerName
+		}
+		p.AgentVersion = e.describeHostVersion(agent, name, version, false)
+		return p
+	}
 	if profile.preferences.Source != "" {
 		planned.Preferences = &profile.preferences.PreferencePosture
 	}
@@ -467,7 +482,7 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 	// stays planned, keeping every pre-existing pure-planned unit test
 	// hermetic (Architectural Context: "NewForAudit stays runtime-less").
 	if e.Runtime == "" {
-		return planned, nil
+		return deferVersionReport(planned), nil
 	}
 
 	running, err := e.containerRunning(scope.ContainerName)
@@ -478,14 +493,14 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 		// containerExistenceFinding classification, #572). Still returned as
 		// a report (nil error, exit 0), never a hard failure.
 		planned.InspectWarning = fmt.Sprintf("container disposition could not be determined (%s ps failed: %v); showing the planned posture only, not the running container's actual state", e.Runtime, err)
-		return planned, nil
+		return deferVersionReport(planned), nil
 	}
 	if !running {
 		// A never-launched and a stopped/stale container are indistinguishable
 		// at this probe (`ps` only lists running containers) and both
 		// legitimately report the unweakened planned posture with no warning
 		// — this is not an inspect failure (AC #3).
-		return planned, nil
+		return deferVersionReport(planned), nil
 	}
 
 	observed, err := e.deriveObservedPosture(scope, agent, home, opts, planned, profile)
@@ -495,7 +510,7 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 		// baseline (Q2, AC #9/#11) — degrade to a warning, never a hard
 		// failure or basis:"running".
 		planned.InspectWarning = fmt.Sprintf("the running container's actual posture could not be verified (%v); showing the planned posture only, not the running container's actual state", err)
-		return planned, nil
+		return deferVersionReport(planned), nil
 	}
 	if planned.Preferences != nil {
 		observed.Preferences = planned.Preferences
@@ -505,7 +520,7 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 			e.readPreferenceReport(scope.ContainerName, agent, observed.Preferences)
 		}
 	}
-	return observed, nil
+	return deferVersionReport(observed), nil
 }
 
 // buildPlannedPosture builds the hypothetical next-launch Posture
@@ -1015,6 +1030,7 @@ func (p Posture) WriteText(w io.Writer) error {
 	}
 
 	_, _ = fmt.Fprintf(bw, "Image: %s (%s)\n", p.Image.Reference, p.Image.Type)
+	p.AgentVersion.writeText(bw)
 	_, _ = fmt.Fprintf(bw, "Workspace: %s -> %s\n", p.Workspace.HostPath, p.Workspace.ContainerPath)
 	_, _ = fmt.Fprintf(bw, "Network: %s (weakened=%t)\n", p.Network.Mode, p.Network.Weakened)
 	_, _ = fmt.Fprintf(bw, "Reseed creds: %t", p.ReseedCreds)

@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,9 +10,34 @@ import (
 	"time"
 )
 
-func versionProfileFixture(t *testing.T, agent, script string) string {
+// The actual native host probe runs this test binary from a temporary client
+// installation. Reading the adjacent fixture permits deterministic version,
+// timeout and output-limit cases without accepting executable scripts.
+func versionProbeTestChild() bool {
+	if len(os.Args) != 2 || os.Args[1] != "--version" {
+		return false
+	}
+	path, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
+	body, err := os.ReadFile(path + ".output")
+	if err != nil {
+		panic(err)
+	}
+	if string(body) == "stall" {
+		time.Sleep(time.Minute)
+	}
+	fmt.Println(string(body))
+	return true
+}
+
+func versionProfileFixture(t *testing.T, agent, output string) string {
 	t.Helper()
 	home := t.TempDir()
+	previous := versionAccountHome
+	versionAccountHome = func() (string, error) { return home, nil }
+	t.Cleanup(func() { versionAccountHome = previous })
 	t.Setenv("HOME", home)
 	configDir := filepath.Join(home, ".config")
 	t.Setenv("XDG_CONFIG_HOME", configDir)
@@ -22,8 +48,19 @@ func versionProfileFixture(t *testing.T, agent, script string) string {
 	if err := os.Mkdir(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if script != "" {
-		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0700); err != nil {
+	if output != "" {
+		self, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(self)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path+".output", []byte(output), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -63,7 +100,7 @@ func TestFollowHostAgentVolume(t *testing.T) {
 			e, log, warnings := volumeCheckEngineStatus(t, status, 0, tc.updateExit, 0)
 			script := ""
 			if tc.version != "" {
-				script = "test \"$1\" = --version && printf '%s\\n' '" + tc.version + " (Claude Code)'"
+				script = tc.version + " (Claude Code)"
 			}
 			versionProfileFixture(t, "claude", script)
 			err := e.EnsureAgentVolume("claude", tc.running)
@@ -90,7 +127,7 @@ func TestFollowHostAgentVolume(t *testing.T) {
 func TestFollowHostSweepAndManualUpdate(t *testing.T) {
 	for _, sweep := range []bool{true, false} {
 		e, log, _ := volumeCheckEngine(t, 0, 0, 0)
-		versionProfileFixture(t, "claude", "echo '4.3.2 (Claude Code)'")
+		versionProfileFixture(t, "claude", "4.3.2 (Claude Code)")
 		var err error
 		if sweep {
 			err = e.UpdateAgentSkipIfPinned("claude")

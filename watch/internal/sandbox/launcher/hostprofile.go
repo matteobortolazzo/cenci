@@ -27,24 +27,61 @@ type hostContentConfig struct {
 // Policy input and resolved content are kept together so create, reuse and
 // audit cannot disagree about which host files the repository is authorized for.
 type hostProfile struct {
-	Repositories    []string          `json:"repositories"`
-	Content         hostContentConfig `json:"content"`
-	Preferences     json.RawMessage   `json:"preferences"`
-	Version         json.RawMessage   `json:"version"`
-	Plugins         json.RawMessage   `json:"plugins"`
-	Authorized      bool              `json:"-"`
-	Mounts          []MountPosture    `json:"-"`
-	ContentIdentity string            `json:"-"`
-	configPath      string
-	preferences     hostPreferences
+	Repositories      []string          `json:"repositories"`
+	Content           hostContentConfig `json:"content"`
+	Preferences       json.RawMessage   `json:"preferences"`
+	Version           json.RawMessage   `json:"version"`
+	Plugins           json.RawMessage   `json:"plugins"`
+	Authorized        bool              `json:"-"`
+	Mounts            []MountPosture    `json:"-"`
+	ContentIdentity   string            `json:"-"`
+	configPath        string
+	versionConfigPath string
+	preferences       hostPreferences
 }
 
 func resolveHostProfile(agent string, scope Scope, home string) (hostProfile, error) {
+	path := run.DefaultConfigPath()
+	profile, err := readHostProfile(agent, scope, home, path)
+	if err != nil || (agent != "claude" && agent != "codex") {
+		return profile, err
+	}
+	accountHome, err := versionAccountHome()
+	if err != nil {
+		return hostProfile{}, err
+	}
+	anchor := filepath.Join(accountHome, ".config", "cenci", "config.json")
+	if filepath.Clean(path) != anchor {
+		if len(profile.Version) > 0 {
+			return hostProfile{}, fmt.Errorf("configure the agent version policy in the OS account's %s; HOME and XDG_CONFIG_HOME cannot select a host executable", anchor)
+		}
+		// The store is shared across repos and across XDG environments. An
+		// alternate config cannot authorize host execution or disable the
+		// account's policy and start a competing managed latest update.
+		global, err := readHostProfile(agent, Scope{}, accountHome, anchor)
+		if err != nil {
+			return hostProfile{}, err
+		}
+		profile.Version = global.Version
+	}
+	profile.versionConfigPath = anchor
+	policy, err := profile.versionPolicy()
+	if err != nil {
+		return hostProfile{}, err
+	}
+	if policy.Mode == "follow-host" && scope.WorkspaceBindHost != "" {
+		if err := policy.rejectWritableBind(scope.WorkspaceBindHost, "workspace"); err != nil {
+			return hostProfile{}, err
+		}
+	}
+	return profile, nil
+}
+
+func readHostProfile(agent string, scope Scope, home, path string) (hostProfile, error) {
 	var profile hostProfile
 	if agent != "claude" && agent != "codex" {
 		return profile, nil
 	}
-	path := run.DefaultConfigPath()
 	if path == "" {
 		return profile, nil
 	}
@@ -87,15 +124,6 @@ func resolveHostProfile(agent string, scope Scope, home string) (hostProfile, er
 		return hostProfile{}, fmt.Errorf("%s: sandboxHostProfiles.%s: %w", path, agent, err)
 	}
 	profile.configPath = path
-	policy, err := profile.versionPolicy()
-	if err != nil {
-		return hostProfile{}, err
-	}
-	if policy.Mode == "follow-host" && scope.WorkspaceBindHost != "" {
-		if err := policy.rejectWritableBind(scope.WorkspaceBindHost, "workspace"); err != nil {
-			return hostProfile{}, err
-		}
-	}
 	for _, repo := range profile.Repositories {
 		if !filepath.IsAbs(repo) || filepath.Clean(repo) != repo || !addDirPathIsPlain(repo) {
 			return hostProfile{}, fmt.Errorf("%s: invalid repository scope %q; use a canonical absolute repository root", path, repo)

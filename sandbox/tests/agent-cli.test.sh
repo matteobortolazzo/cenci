@@ -179,6 +179,13 @@ for MOCK_VERSION in 1.2.3 1.3.0 1.1.0; do
 done
 if "${follow_ok}" && [[ -x "${old_exe}" && "$("${old_exe}" --version)" == 1.2.3 ]]; then pass; else fail "follow-host activation or old release retention"; fi
 
+echo "case: returning to a retained verified version reuses its installation offline"
+: >"${CALL_LOG}"
+if NPM_VIEW_FAIL=1 run_update codex 1.2.3 --follow-host >/dev/null &&
+    [[ "$(realpath "${ROOT_DIR}/current/node_modules/.bin/codex")" == "${old_exe}" ]] &&
+    NPM_VIEW_FAIL=1 run_update codex 1.1.0 --follow-host >/dev/null &&
+    [[ ! -s "${CALL_LOG}" ]]; then pass; else fail "retained release cache miss"; fi
+
 echo "case: matching verified version works offline and a failed change preserves the release"
 : >"${CALL_LOG}"
 if NPM_VIEW_FAIL=1 run_update codex 1.1.0 --follow-host >/dev/null && [[ ! -s "${CALL_LOG}" ]] &&

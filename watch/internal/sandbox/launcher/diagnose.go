@@ -678,6 +678,12 @@ func (e *Engine) Diagnose(scope Scope) error {
 	_, _ = fmt.Fprintf(e.Stdout, "cenci diagnose: %s (agent=%s)\n", scope.ContainerName, agent)
 	_, _ = fmt.Fprintln(e.Stdout, "Note: recent logs and mount paths below may contain sensitive data (secrets, credentials, host paths) — review before sharing this output.")
 	_, _ = fmt.Fprintf(e.Stdout, "Container: %s\n", scope.ContainerName)
+	policy, policyErr := globalHostVersionPolicy(agent)
+	if policyErr != nil {
+		findings = append(findings, finding{Message: fmt.Sprintf("agent version policy could not be read: %v", policyErr), Severity: SeverityWarning})
+	} else {
+		e.describeHostVersion(agent, scope.ContainerName, policy, true).writeText(e.Stdout)
+	}
 
 	status, exitCode, stateErr := e.containerStartupState(scope.ContainerName)
 	var stateExitErr *exec.ExitError
