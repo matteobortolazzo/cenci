@@ -369,7 +369,7 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 
 // auditWithSecrets is Audit's body, classifying and reporting secrets against
 // the caller-supplied resolved set.
-func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, error) {
+func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (result Posture, auditErr error) {
 	agent := opts.Agent
 	if agent == "" {
 		agent = "claude"
@@ -417,6 +417,23 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 	if err != nil {
 		return Posture{}, err
 	}
+	version, err := profile.versionPolicy()
+	if err != nil {
+		return Posture{}, err
+	}
+	// Report the effective version only after we know whether this is a
+	// running workload or a planned launch. Failed audits have no posture.
+	if version.Mode != "" {
+		defer func() {
+			if auditErr == nil {
+				name := ""
+				if result.Basis == PostureBasisRunning {
+					name = scope.ContainerName
+				}
+				result.AgentVersion = e.describeHostVersion(agent, name, version, false)
+			}
+		}()
+	}
 	if err := profile.rejectWritableOverlaps(addDirs); err != nil {
 		return Posture{}, err
 	}
@@ -456,20 +473,6 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 	allEnvArgs = append(allEnvArgs, envArgs...)
 
 	planned := buildPlannedPosture(agent, scope, home, opts, dindOn, dindDegraded, mounts, allEnvArgs, featureArgs, stagedKinds, secrets)
-	version, err := profile.versionPolicy()
-	if err != nil {
-		return Posture{}, err
-	}
-	// A planned audit cannot inspect a stopped workload's store. A running
-	// audit reads it after the container's actual mounts are established.
-	deferVersionReport := func(p Posture) Posture {
-		name := ""
-		if p.Basis == PostureBasisRunning {
-			name = scope.ContainerName
-		}
-		p.AgentVersion = e.describeHostVersion(agent, name, version, false)
-		return p
-	}
 	if profile.preferences.Source != "" {
 		planned.Preferences = &profile.preferences.PreferencePosture
 	}
@@ -482,7 +485,7 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 	// stays planned, keeping every pre-existing pure-planned unit test
 	// hermetic (Architectural Context: "NewForAudit stays runtime-less").
 	if e.Runtime == "" {
-		return deferVersionReport(planned), nil
+		return planned, nil
 	}
 
 	running, err := e.containerRunning(scope.ContainerName)
@@ -493,14 +496,14 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 		// containerExistenceFinding classification, #572). Still returned as
 		// a report (nil error, exit 0), never a hard failure.
 		planned.InspectWarning = fmt.Sprintf("container disposition could not be determined (%s ps failed: %v); showing the planned posture only, not the running container's actual state", e.Runtime, err)
-		return deferVersionReport(planned), nil
+		return planned, nil
 	}
 	if !running {
 		// A never-launched and a stopped/stale container are indistinguishable
 		// at this probe (`ps` only lists running containers) and both
 		// legitimately report the unweakened planned posture with no warning
 		// — this is not an inspect failure (AC #3).
-		return deferVersionReport(planned), nil
+		return planned, nil
 	}
 
 	observed, err := e.deriveObservedPosture(scope, agent, home, opts, planned, profile)
@@ -510,7 +513,7 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 		// baseline (Q2, AC #9/#11) — degrade to a warning, never a hard
 		// failure or basis:"running".
 		planned.InspectWarning = fmt.Sprintf("the running container's actual posture could not be verified (%v); showing the planned posture only, not the running container's actual state", err)
-		return deferVersionReport(planned), nil
+		return planned, nil
 	}
 	if planned.Preferences != nil {
 		observed.Preferences = planned.Preferences
@@ -520,7 +523,7 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 			e.readPreferenceReport(scope.ContainerName, agent, observed.Preferences)
 		}
 	}
-	return deferVersionReport(observed), nil
+	return observed, nil
 }
 
 // buildPlannedPosture builds the hypothetical next-launch Posture

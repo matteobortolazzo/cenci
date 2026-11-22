@@ -27,17 +27,18 @@ type hostContentConfig struct {
 // Policy input and resolved content are kept together so create, reuse and
 // audit cannot disagree about which host files the repository is authorized for.
 type hostProfile struct {
-	Repositories      []string          `json:"repositories"`
-	Content           hostContentConfig `json:"content"`
-	Preferences       json.RawMessage   `json:"preferences"`
-	Version           json.RawMessage   `json:"version"`
-	Plugins           json.RawMessage   `json:"plugins"`
-	Authorized        bool              `json:"-"`
-	Mounts            []MountPosture    `json:"-"`
-	ContentIdentity   string            `json:"-"`
-	configPath        string
 	versionConfigPath string
-	preferences       hostPreferences
+
+	Repositories    []string          `json:"repositories"`
+	Content         hostContentConfig `json:"content"`
+	Preferences     json.RawMessage   `json:"preferences"`
+	Version         json.RawMessage   `json:"version"`
+	Plugins         json.RawMessage   `json:"plugins"`
+	Authorized      bool              `json:"-"`
+	Mounts          []MountPosture    `json:"-"`
+	ContentIdentity string            `json:"-"`
+	configPath      string
+	preferences     hostPreferences
 }
 
 func resolveHostProfile(agent string, scope Scope, home string) (hostProfile, error) {
