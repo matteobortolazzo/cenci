@@ -164,6 +164,7 @@ agent_cli_cleanup_versions() {
 install_agent_cli_unlocked() {
     local agent="${1:-}" requested="${2:-}" skip_if_pinned="${3:-0}" package label root resolved version integrity metadata
     local staging release current_target executable lock_integrity pin_value current_version
+    local follow_host="${4:-0}"
     package="$(agent_cli_package "${agent}")" || return $?
     label="$(agent_cli_label "${agent}")" || return $?
     root="$(agent_cli_root)"
@@ -175,6 +176,20 @@ install_agent_cli_unlocked() {
     # exclusive flock, so any .state-* present at this point cannot belong
     # to a concurrent writer -- it is guaranteed to be a prior orphan.
     rm -f "${root}"/.state-* 2>/dev/null || true
+
+    # Re-check both facts under the update lock. Another launch may have
+    # finished installing this version, or the user may just have pinned it.
+    if [[ "${follow_host}" == 1 ]]; then
+        pin_value="$(agent_cli_read_fact "${root}/PIN")" || return 1
+        if agent_cli_is_exact_semver "${pin_value}"; then
+            requested="${pin_value}"
+        fi
+        current_version="$(agent_cli_read_fact "${root}/current/VERSION")" || return 1
+        if [[ "${current_version}" == "${requested}" ]] && agent_cli_populated "${root}" "${agent}"; then
+            printf 'Shared %s already at %s; nothing to install.\n' "${label}" "${requested}"
+            return 0
+        fi
+    fi
 
     # Pin gate: evaluated first -- before any mkdir, any stamp, any npm
     # call -- so a refusal or skip never touches the volume or the
@@ -230,7 +245,7 @@ install_agent_cli_unlocked() {
     # "is VERSION present" check is needed.
     current_version="$(agent_cli_read_fact "${root}/current/VERSION")"
     if [[ "${current_version}" == "${version}" ]] && agent_cli_populated "${root}" "${agent}"; then
-        if [[ -n "${requested}" ]]; then
+        if [[ -n "${requested}" && "${follow_host}" == 0 ]]; then
             agent_cli_write_atomic "${root}/PIN" "${version}" || {
                 printf 'agent-cli: failed to write %s/PIN.\n' "${root}" >&2
                 return 1
@@ -281,10 +296,21 @@ install_agent_cli_unlocked() {
         printf 'agent-cli: verified install did not create %s at %s.\n' "${label}" "${executable}" >&2
         return 1
     fi
-    "${executable}" --version || {
+    local reported
+    reported="$("${executable}" --version)" || {
         printf 'agent-cli: staged %s failed its --version health check.\n' "${label}" >&2
         return 1
     }
+    printf '%s\n' "${reported}"
+    if [[ "${follow_host}" == 1 ]]; then
+        case "${agent}:${reported}" in
+        "claude:${version} (Claude Code)"|"codex:codex-cli ${version}"|"${agent}:${version}") ;;
+        *)
+            printf 'agent-cli: staged %s did not report requested version %s.\n' "${label}" "${version}" >&2
+            return 1
+            ;;
+        esac
+    fi
 
     printf '%s\n' "${version}" >"${staging}/VERSION" || {
         printf 'agent-cli: failed to write %s/VERSION.\n' "${staging}" >&2
@@ -348,14 +374,18 @@ install_agent_cli_unlocked() {
     # as the short-circuit's PIN write above. A write failure here is loud
     # (return 1) because the activation itself already succeeded and the
     # caller's requested pin would otherwise be silently dropped.
-    if [[ -n "${requested}" ]]; then
+    if [[ -n "${requested}" && "${follow_host}" == 0 ]]; then
         agent_cli_write_atomic "${root}/PIN" "${version}" || {
             printf 'agent-cli: failed to write %s/PIN.\n' "${root}" >&2
             return 1
         }
     fi
 
-    agent_cli_cleanup_versions "${root}"
+    # A new host-following launch may share this cache with still-running
+    # processes from several older releases that load files on demand.
+    if [[ "${follow_host}" == 0 ]]; then
+        agent_cli_cleanup_versions "${root}"
+    fi
     agent_cli_stamp "${root}" ".last-success" \
         || printf 'agent-cli: warning: failed to record %s/.last-success.\n' "${root}" >&2
     printf 'Activated %s %s. Running sandboxes keep using the version they started with —\n' "${label}" "${version}"
@@ -363,7 +393,7 @@ install_agent_cli_unlocked() {
 }
 
 update_agent_cli() {
-    local agent="${1:-}" root lock_file arg requested="" skip_if_pinned=0
+    local agent="${1:-}" root lock_file arg requested="" skip_if_pinned=0 follow_host=0
     agent_cli_package "${agent}" >/dev/null || return $?
     shift || true
 
@@ -373,6 +403,9 @@ update_agent_cli() {
         case "${arg}" in
         --skip-if-pinned)
             skip_if_pinned=1
+            ;;
+        --follow-host)
+            follow_host=1
             ;;
         -*)
             printf 'agent-cli: unknown option %q for update.\n' "${arg}" >&2
@@ -387,6 +420,10 @@ update_agent_cli() {
             ;;
         esac
     done
+    if [[ "${follow_host}" == 1 ]] && { [[ "${agent}" == opencode ]] || ! agent_cli_is_exact_semver "${requested}"; }; then
+        echo "agent-cli: --follow-host requires Claude or Codex and an exact version." >&2
+        return 2
+    fi
     if [[ -n "${requested}" ]] && [[ "${skip_if_pinned}" == 1 ]]; then
         # With an explicit version the pin gate never fires, so the flag
         # would be silently inert -- a conflicting-flags usage error instead.
@@ -403,7 +440,7 @@ update_agent_cli() {
     fi
     (
         flock -x 9 || { echo "agent-cli: failed to lock the shared CLI volume." >&2; exit 1; }
-        install_agent_cli_unlocked "${agent}" "${requested}" "${skip_if_pinned}"
+        install_agent_cli_unlocked "${agent}" "${requested}" "${skip_if_pinned}" "${follow_host}"
     ) 9>"${lock_file}"
 }
 
