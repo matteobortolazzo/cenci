@@ -76,7 +76,7 @@ func resolvePreferences(raw json.RawMessage, agent string, scope Scope, home str
 	if err != nil {
 		return prefs, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
 		return prefs, err
@@ -130,13 +130,13 @@ func (p *PreferencePosture) writeText(w io.Writer) {
 	if p == nil {
 		return
 	}
-	fmt.Fprintf(w, "\nPersonal preferences (%s) from %s\n", p.Status, p.Source)
+	_, _ = fmt.Fprintf(w, "\nPersonal preferences (%s) from %s\n", p.Status, p.Source)
 	for _, group := range []struct {
 		name string
 		keys []string
 	}{{"selected", p.Selected}, {"skipped", p.Skipped}, {"imported", p.Imported}, {"locally overridden", p.Overridden}} {
 		if len(group.keys) > 0 {
-			fmt.Fprintf(w, "  %s  %s\n", group.name, strings.Join(group.keys, ", "))
+			_, _ = fmt.Fprintf(w, "  %s  %s\n", group.name, strings.Join(group.keys, ", "))
 		}
 	}
 }

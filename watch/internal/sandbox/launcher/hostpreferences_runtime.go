@@ -68,10 +68,10 @@ func (e *Engine) activatePreferences(launch launchCtx) error {
 		return fmt.Errorf("incomplete %s sandbox preference report", launch.Agent)
 	}
 	if len(report.Overridden) > 0 {
-		fmt.Fprintf(e.Stderr, "Sandbox-local preferences take precedence for %s\n", strings.Join(report.Overridden, ", "))
+		_, _ = fmt.Fprintf(e.Stderr, "Sandbox-local preferences take precedence for %s\n", strings.Join(report.Overridden, ", "))
 	}
 	if len(p.Skipped) > 0 {
-		fmt.Fprintf(e.Stderr, "Skipped unsupported host preferences in %s: %s\n", p.Source, strings.Join(p.Skipped, ", "))
+		_, _ = fmt.Fprintf(e.Stderr, "Skipped unsupported host preferences in %s: %s\n", p.Source, strings.Join(p.Skipped, ", "))
 	}
 	return nil
 }
