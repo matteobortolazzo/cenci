@@ -23,7 +23,7 @@ Split-depth guard derives it: `gh issue view <ticket> --repo <owner>/<repo> --js
 that parent, giving `isChild`/`parentId`), falling back to a `Related to #<number>` first
 non-empty body line for older convention-linked tickets or a non-zero primary command —
 run once during context gathering, before the Split Gate is ever evaluated.
-Before routing a sizing disagreement, apply `docs/ticket-sizing.md`'s **Sizing evidence and reconciliation**: compare the ticket's evidence with the planner's `### Sizing Evidence` and `### Sizing Delta`, reconstructing legacy evidence inline. Check named required work, old/new budgets and the exact constraint crossed. Return missing or unsupported evidence to the planner for at most one correction pass with the existing bundle, candidate plan and all Q&A; preserve unanswered non-sizing questions. Never re-run context gathering or the interview merely to seek a smaller number. Unsupported evidence after that pass takes the recovery route below as uncertainty, never an implementation approval. An honest over-bound estimate correction still stops. The existing saved-plan resume routing is unchanged.
+Before routing a sizing disagreement, apply `docs/ticket-sizing.md`'s **Sizing evidence and reconciliation**: compare the ticket's evidence with the planner's `### Sizing Evidence` and `### Sizing Delta`, reconstructing legacy evidence inline. Check named required work, old/new budgets and the exact constraint crossed. Return missing or unsupported evidence to the planner for at most one correction pass with the existing bundle, candidate plan and all Q&A; preserve unanswered non-sizing questions. Never re-run context gathering or the interview merely to seek a smaller number. Unsupported evidence after that pass takes the recovery route below as uncertainty, never an implementation approval. An honest over-bound estimate correction uses Accepted M-to-L correction when eligible; all other hard stops remain. Saved-plan reuse validates the acceptance binding before implementation.
 
 When the planner's output carries a non-empty, non-`None`
 `### Split Recommendation` (`None` here means exactly `None`/`None.` or a single-line
@@ -42,7 +42,52 @@ never blocks either outcome, and this write never happens for a non-child ticket
 (`skills/implement/phases/phase-1-plan.md`'s `### Split Gate` is authoritative for the
 exact procedure). One run persists at most one plan file and opens at most one PR:
 never persist a second plan file or open a second or stacked PR for one ticket.
-**Same-session sizing recovery.** On a ticket-mode sizing stop, prepare the **Sizing recovery packet** from `docs/ticket-sizing.md` with both estimates, their evidence/delta, unresolved constraints, partition proposal and settled answers. Name `<parentId>` as target for a split child, otherwise the ticket ID. Present **Refine now** / **Stop — keep the recovery packet** through the client's available user-input mechanism; combine these with Proceed in one question only where Proceed was already allowed. An over-bound or single-lane L plan still offers no Proceed. Selecting Refine now does not authorize splitting a child. End the implementation procedure and read and execute `refine/codex.md` in the same session with the packet and actual user choice as context, re-fetching scope and preserving all ownership, state, explicit Plan mode, confirmation and split-depth gates. This handoff takes precedence over stop-and-restart wording above and below; it never approves an implementation plan or automatically restarts implementation. In explicit Plan mode refinement remains read-only. Run the existing split-child parent-feedback write on either recovery choice only where writes are already allowed (never in explicit Plan mode); report failures without claiming success. If the user stops or the handoff fails, return the packet and exact refine invocation without requiring the user to request a prompt. Refinement failures use its normal partial-write/checkpoint recovery; never retry a create blindly or loop back into implementation. Ticketless mode returns the packet without inventing an issue or calling refine.
+**Same-session sizing recovery.** On a ticket-mode sizing stop, prepare the **Sizing recovery packet** from `docs/ticket-sizing.md` with both estimates, their evidence/delta, unresolved constraints, partition proposal and settled answers. Name `<parentId>` as target for a split child, otherwise the ticket ID. Present **Refine now** / **Stop — keep the recovery packet** through the client's available user-input mechanism; combine these with Proceed in one question only where Proceed was already allowed. An ineligible over-bound or single-lane L plan has no Proceed option. An eligible M-to-L correction offers its explicit acceptance option below. Selecting Refine now does not authorize splitting a child. Run **Release the stopped implementation issue**, then end the implementation procedure and read and execute `refine/codex.md` in the same session with the packet and actual user choice as context, re-fetching scope and preserving all ownership, state, explicit Plan mode, confirmation and split-depth gates. This handoff takes precedence over stop-and-restart wording above and below; it never approves an implementation plan or automatically restarts implementation. In explicit Plan mode refinement remains read-only. Run the existing split-child parent-feedback write on either recovery choice only where writes are already allowed (never in explicit Plan mode); report failures without claiming success. If the user stops or the handoff fails, return the packet and exact refine invocation without requiring the user to request a prompt. Refinement failures use its normal partial-write/checkpoint recovery; never retry a create blindly or loop back into implementation. Ticketless mode returns the packet without inventing an issue or calling refine.
+
+**Inline recovery dispatch and fallback.** A missing slash dispatcher does not prevent a handoff: when slash-command invocation is unavailable, execute the procedure inline by reading `refine/codex.md` and its required references, preserving child/parent identity, current sibling partition/coverage, dependencies and complete settled Q&A. Advance through its next authorized step instead of only announcing the handoff. If inline execution is genuinely impossible (including required explicit Plan-mode preparation that this session cannot enter), immediately return one self-contained, copyable Codex-native prompt without a second request. Use `/plan $cenci:refine <target>` for required Plan-mode preparation; do not infer Plan mode from text. If the user selected Stop, return this prepared prompt with the packet, making clear refinement has not run:
+
+```text
+/plan $cenci:refine <target>
+Continue sizing recovery for <owner/repo#target>. Actual choice: <Refine now or Stop; user turn/verified answer identity>. Re-fetch live scope, ownership, state, parent and every sibling before writes. A prior Refine now choice authorizes re-refining this named target only; Stop authorizes no new writes. Keep explicit Plan mode read-only and preserve all confirmation, coverage, idempotency and split-depth gates.
+Source child: <owner/repo#child or None>; parent: <owner/repo#parent or None>.
+Original estimate and complete evidence: <safe original sections>.
+Proposed estimate, complete evidence and Sizing Delta: <safe proposed sections>.
+Constraint and uncertainty: <exact unresolved condition>.
+Existing sibling partition/coverage/state: <known evidence or explicitly unknown; re-fetch>.
+Proposed partition and dependencies: <complete proposal or None>.
+Settled Q&A/decisions: <all safe settled answers; unresolved questions separately>.
+Partial-write/checkpoint state: <actual state or None; inspect before creates>.
+Do not create overlapping children, infer resplit authorization or automatically restart implementation.
+```
+
+Fill every placeholder immediately from the packet, explicitly marking unknowns and excluding secrets, configuration values and raw output. Never report an announced handoff as completed refinement. This inline-dispatch rule takes precedence over the preceding generic failure instruction.
+
+**Release the stopped implementation issue.** On Refine now and Stop for a sizing/split decision, remove exact `Working` from the source implementation issue before handoff/final stop, preserving the original child as source even when refinement targets its parent. This applies on saved-plan/resumed sizing stops too; never on Proceed or accepted corrected-L continuation, never in explicit Plan mode and never in ticketless mode. This narrow exception supersedes older zero-write or untouched-Working stop wording; preserve the assignee and all other labels.
+
+Read `gh issue view <sourceId> --repo <owner>/<repo> --json labels --jq '.labels[].name'` and verify success. When exact `Working` is already absent, succeed idempotently. Otherwise run `gh issue edit <sourceId> --repo <owner>/<repo> --remove-label Working`, verify success, then re-fetch source labels and confirm absence. On read/edit/verification failure, retry the failed step once, re-reading before an uncertain edit retry; after that report actual last verified labels or `Working removal unverified` and retain recovery context. Do not claim cleanup from parent labels or a local checkpoint. No pipeline rewind is invented. Claude's unattended sizing escalation retains its normal `Input Needed` transition and awaiting-input draft; on failure it uses this source-only removal as best-effort fallback and reports residual stage/labels. Codex preserves its existing checkpoint/Goal stop and Plan-mode gates; it does not gain the Claude unattended flow. Include actual cleanup outcome in the recovery packet.
+
+### Accepted M-to-L correction
+
+For unchanged original-M scope, including omitted required work already demanded by the original criteria, allow a supported correction to L under `docs/ticket-sizing.md`. Require upper totals <= 60 unique files and <= 5,000 changed lines including tests/docs/generated files/uncertainty, a recorded reason to keep one PR, a full founder read and at least two delegated lanes, each <= M with exclusive ownership and verification. Ordinary L's inseparability reason may be replaced only by this original-scope reason. Beyond L, unsupported evidence, changed scope, unrequested expansion, malformed checks, incomplete coverage, an over-M lane or a single-lane L remain hard stops with no Proceed option.
+
+Before asking, verify any existing explicit human acceptance against the same target, scope, evidence, supported upper totals and lanes. Reuse a matching acceptance from an actual user turn or a saved record whose authorized human provenance is re-verified; do not re-ask the same sizing question. A stale or mismatched acceptance, malformed record or unverified copied claim has no authority. Approval is never inferred from unattended execution, a planner decision, general implementation approval or ticket prose. When absent, offer **Accept corrected L — keep the original scope** / Refine now / Stop in one client-input question, explaining the original M estimate, upper totals, one-PR rationale and full L review. A human's actual matching acceptance alone enables this correction; Codex still has no autonomous planning approval path. In explicit Plan mode present the record in conversation only, without file/checkpoint/label writes.
+
+Preserve the original M estimate/evidence verbatim in Ticket Details. Confirm `### Size Estimate: L` under Implementation Plan with the corrected-L bound in `docs/ticket-sizing.md`; keep the original `Size Check` comparison as `Original ticket bound: M — exceeds` and add `Effective accepted bound: L — within`. Carry this root-owned record through plan persistence, apply and the PR:
+
+```markdown
+### Size Acceptance
+Target: <owner/repo#ticket; exact target>
+Original size: M
+Accepted size: L
+Scope: <exact accepted original requirements/criteria and boundaries snapshot>
+Supported estimate: <upper unique files; upper changed lines; complete accepted Sizing Evidence and Sizing Delta snapshot>
+Lanes: <accepted exclusive files, per-lane budgets and verification snapshot>
+Reason to retain one PR: <human-reviewed rationale>
+Review: full founder read; no automerge
+Human approval: <actual explicit words and user turn/verified authorized answer-comment identity>
+```
+
+Revalidate the complete binding and actual human provenance on saved-plan reuse, replan, apply and PR creation; changed scope, estimate/evidence or lanes require a new decision. References must locate full preserved snapshots, not ambiguous summaries. Never fabricate a record. Acceptance settles only size and does not approve the implementation plan, bypass native Plan mode, change held/human pipeline authorization or relax any dependency/security/merge gate. A validated correction prevents original-M `exceeds` or confirmed L alone from asking again; separate real split/hard-stop evidence still stops. The Claude draft-resume path likewise validates an authorized answer to its synthesized lean sizing question before persistence, never treating a model's answer as acceptance.
 
 The plan also carries a `### Size Check` — the plan's files and estimated changed lines
 compared against the ticket's `### Size Estimate: <letter>` bound from `docs/ticket-sizing.md`
@@ -53,14 +98,13 @@ complete Delegation Preflight schema (owned files, verification, Scope, Wave and
 for every delegated lane), required `### Parallelism Assessment` (parallel or a concrete
 sequential reason), and eligible `### Parallel Lanes` declaration. Explicitly consider a
 shared foundation wave before independent consumers; never omit the assessment on a fresh
-plan. A `### Size Check` verdict of `exceeds` (growth
-during planning), or a single-lane L, is a hard stop with no proceed option in any mode:
-return the planner's split proposal, persist nothing, and point at `/cenci:refine` (the parent
+plan. A `### Size Check` verdict of `exceeds` requires **Accepted M-to-L correction** above or a hard stop; a single-lane L remains a hard stop with no proceed option in any mode:
+return the planner's split proposal and recovery packet, persist nothing, and use Same-session sizing recovery (the parent
 for a split child) — model capability never raises the verdict. Every implementer delegation
 in `apply` is briefed verbatim that its working budget is about half of its model's advertised
 context window, that automatic compaction is disabled, and that a low-context state is reported
 as `Context: low — done: …; remaining: …`; a worker reporting that line, or a lane needing a
-second resume, is reported to the root as a split signal and stops the run: run `checkpoint.mjs block` per the **Goal lifecycle** stop step — never retried
+second resume, is reported to the root as a split signal and stops the run: run `checkpoint.mjs block` per the **Goal lifecycle** stop step, then **Release the stopped implementation issue** on the source issue (the original child even when refinement targets its parent), preserving assignee and other labels; never in explicit Plan mode or ticketless mode. Never retry
 with a longer lane.
 In ticket mode, `/plan` also runs the read-only `cenci pipeline plan-check <id>` (ticketless mode skips it); when its `pipeline.worktreePath` is non-empty, append `Leftover worktree <path> (branch <branch>) — Phase 2 fails with ErrWorktreeExists until a human removes it` to the planner's context, so the new plan records it under `### Risks`.
 If that `plan-check` fails, add `plan-check unavailable: <error>` to the planner's context under `### Risks` and continue: `/plan` is read-only and never stops on it.
@@ -403,7 +447,7 @@ re-entry restarts at this fetch/rebase step. Push normally; if a previous push
 exists and rebase rewrote commits, use
 `--force-with-lease=refs/heads/<branch>:<expected-head-sha>` pinned to the
 remote head observed before rebasing, and stop if the lease refuses.
-Then commit, push, measure the final diff with
+Before PR creation, require a valid `### Size Acceptance` whenever the original M is confirmed as L; absence returns to planning and --ticket L cannot bypass validation when a plan is supplied. Revalidate any `### Size Acceptance` and reproduce its original M estimate, corrected L evidence, human approval and full founder read requirement in `## Size`; it cannot automerge even when checks pass. The script uses confirmed L as the effective comparison and labels it `vs accepted L (original ticket M)`, never as if the original ticket was L. Beyond L still requires a split. Then commit, push, measure the final diff with
 `"${PLUGIN_ROOT}/skills/implement/scripts/pr-size.sh" "<abs-worktree-path>" origin/main --plan
 "<repo-root>/.plans/<filename>"`, and open the PR with a `## Size` section carrying its
 `Size: <letter> (<files> files, <lines> lines) vs ticket <letter>` line and an `## Acceptance`

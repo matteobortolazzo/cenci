@@ -59,14 +59,34 @@ a planning session that does run treats the repo as `"interactive"`; see
 
 ## What the loop looks like
 
-A sizing disagreement is reconciled against refinement's file/line evidence before it
-becomes a split escalation. Missing legacy evidence is reconstructed during planning;
-unrequested plan expansion is removed, while genuine over-bound work still stops. Lean
-planning retains the evidence and settled answers in its awaiting-input draft and question;
-it does not automatically re-refine or create more children. In interactive ticket runs,
-**Refine now** can hand the same evidence to refinement in the current session, with its
-normal ownership, confirmation and split-depth checks. The choice authorizes re-refining
-the named target only, and does not start implementation automatically.
+Before refinement writes implementation tickets, an independent planner inventories the minimum
+work, including registration/guard paths, generated assets, tests and docs. Refinement reconciles
+unique paths and supported upper estimates and re-cuts infeasible partitions before any writes.
+A later sizing disagreement uses that evidence; missing legacy evidence is reconstructed during
+planning, and unrequested expansion is removed. A human may explicitly accept a corrected L
+estimate of unchanged original-M requirements, including required work omitted from the estimate,
+with a reason to keep one PR. Splitting need not be impossible. The original ticket remains M;
+`### Size Acceptance` in the plan and PR carries the actual approval, target, unchanged scope,
+supported estimate/delta, rationale and exclusive M-bounded lanes. Full founder review remains
+required. Over-L work, missing evidence and uncovered requirements still stop; unattended runs
+cannot infer acceptance. Prior approval is reusable only while target, scope, evidence and lanes
+match. See [the correction policy](../flow/docs/ticket-sizing.md#accepted-m-to-l-estimate-correction).
+
+Lean planning retains unresolved evidence and settled answers in its awaiting-input draft and
+question; it does not automatically re-refine or create more children. In interactive ticket runs,
+selecting **Refine now** immediately executes the current client's refinement procedure in the
+same session. It carries the child and parent, named target, current sibling partition/coverage,
+evidence, dependencies and Q&A; a split child's target is its parent. Reconcile existing siblings
+before creating children to avoid duplicate work, retaining normal ownership, confirmation and
+split-depth checks. If invocation is genuinely unavailable, immediately return one self-contained,
+copyable client-native prompt containing that target and sanitized packet. This choice authorizes
+refinement only and does not start implementation automatically.
+
+A sizing/split stop removes `Working` from the original ticket or child before either stopping
+or handing off to **Refine now**; assignees and unrelated labels remain unchanged. Unattended
+stops use the existing `Input Needed` path instead of leaving `Working`. Explicit client Plan
+mode skips forbidden issue writes and reports the pending cleanup; ticketless runs have no issue
+to update. An accepted correction that continues implementation retains `Working`.
 
 ```
   ┌─ you: /cenci:refine 42 ──────────────────────────────────────┐

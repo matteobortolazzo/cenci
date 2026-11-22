@@ -9,8 +9,10 @@
 # Lines are insertions plus deletions over the whole diff, generated files and
 # lockfiles included (a binary file counts as one changed file and zero lines).
 # The ticket's letter comes from --ticket, else from the first
-# `### Size Estimate: <letter>` heading in --plan (the planner-confirmed size,
-# or the ticket body appended into the plan), else `unknown`.
+# `### Size Estimate: <letter>` in Implementation Plan, else `unknown`.
+# Legacy plans without that section retain first-heading compatibility.
+# Size Acceptance is a root-validated approval record, not authorization this
+# measurement script can grant. Its structural fields are checked fail-closed.
 #
 # Classification (the table, executable):
 #   S  files <= 10 and lines <= 400
@@ -31,7 +33,7 @@ die() { echo "pr-size.sh: $*" >&2; exit 2; }
 WORKTREE="${1:-}"; BASE="${2:-}"
 [[ -n "${WORKTREE}" && -n "${BASE}" ]] || die "usage: pr-size.sh <worktree-path> <base-ref> [--ticket <S|M|L>] [--plan <plan-file>]"
 shift 2
-TICKET=""; PLAN=""
+TICKET=""; PLAN=""; ORIGINAL="unknown"; ACCEPTED="false"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ticket) TICKET="${2:-}"; shift 2 || die "--ticket needs a value" ;;
@@ -41,13 +43,59 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -d "${WORKTREE}" ]] || die "worktree is not a directory: ${WORKTREE}"
 
-if [[ -z "${TICKET}" && -n "${PLAN}" ]]; then
+if [[ -n "${PLAN}" ]]; then
   [[ -r "${PLAN}" ]] || die "plan file is not readable: ${PLAN}"
-  TICKET="$(grep -m1 -oE '^### Size Estimate: *[SML]\b' "${PLAN}" | grep -oE '[SML]$')" || TICKET=""
+  PLAN_SIZES="$(awk '
+    function size_letter(line) {
+      sub(/^### Size Estimate: */, "", line); sub(/[ \t]*$/, "", line); return line
+    }
+    /^[ \t]*(```|~~~)/ {
+      delimiter = $0; sub(/^[ \t]*/, "", delimiter)
+      char = substr(delimiter, 1, 1); run = 0
+      while (substr(delimiter, run + 1, 1) == char) run++
+      if (!fence) { fence = 1; fence_char = char; fence_length = run }
+      else if (char == fence_char && run >= fence_length && substr(delimiter, run + 1) ~ /^[ \t]*$/) fence = 0
+      next
+    }
+    fence && section == "## Ticket Details" && /^### Size Estimate: *[SML][ \t]*$/ {
+      if (!original) original = size_letter($0)
+    }
+    fence { next }
+    /^## / { section = $0; if ($0 == "## Implementation Plan") has_plan = 1; acceptance = 0 }
+    /^### / { acceptance = (section == "## Implementation Plan" && $0 == "### Size Acceptance"); if (acceptance) has_acceptance++ }
+    /^### Size Estimate: *[SML][ \t]*$/ {
+      letter = size_letter($0)
+      if (!legacy) legacy = letter
+      if (section == "## Implementation Plan" && !confirmed) confirmed = letter
+      if (section == "## Ticket Details" && !original) original = letter
+    }
+    acceptance && /^(Target|Scope|Supported estimate|Lanes|Reason to retain one PR|Human approval):/ {
+      field = $0; sub(/:.*/, "", field); fields[field]++
+      if ($0 !~ /:[ \t]*[^ \t]/ || fields[field] > 1) bad = 1
+    }
+    acceptance && /^Original size:/ { old_m++; if ($0 != "Original size: M") bad = 1 }
+    acceptance && /^Accepted size:/ { new_l++; if ($0 != "Accepted size: L") bad = 1 }
+    acceptance && /^Review:/ { review++; if ($0 != "Review: full founder read; no automerge") bad = 1 }
+    END {
+      size = has_plan ? confirmed : legacy
+      valid = !bad && has_acceptance == 1 && old_m == 1 && new_l == 1 && review == 1 && fields["Target"] && fields["Scope"] && fields["Supported estimate"] && fields["Lanes"] && fields["Reason to retain one PR"] && fields["Human approval"] && size == "L" && original == "M"
+      if (has_acceptance && !valid) exit 2
+      if (original == "M" && size == "L" && !valid) exit 2
+      print (size ? size : "unknown"), (original ? original : "unknown"), (has_acceptance ? "true" : "false")
+    }
+  ' "${PLAN}")" || die "plan Size Acceptance is missing, incomplete or inconsistent; return to planning"
+  read -r PLAN_TICKET ORIGINAL ACCEPTED <<< "${PLAN_SIZES}"
+  if [[ "${ORIGINAL}" == "M" && "${TICKET}" == "L" && "${ACCEPTED}" != "true" ]]; then
+    die "--ticket L cannot replace the original M without a valid plan Size Acceptance; return to planning"
+  fi
+  if [[ "${ACCEPTED}" == "true" && -n "${TICKET}" && "${TICKET}" != "L" ]]; then
+    die "--ticket conflicts with the plan Size Acceptance; return to planning"
+  fi
+  [[ -n "${TICKET}" ]] || TICKET="${PLAN_TICKET}"
 fi
 case "${TICKET}" in
   S|M|L) ;;
-  "") TICKET="unknown" ;;
+  ""|unknown) TICKET="unknown" ;;
   *) die "--ticket must be S, M or L, got: ${TICKET}" ;;
 esac
 
@@ -76,11 +124,16 @@ elif [[ "${actual_rank}" -gt "${ticket_rank}" ]]; then mismatch=above
 elif [[ "${actual_rank}" -lt "${ticket_rank}" ]]; then mismatch=below
 else mismatch=none; fi
 
-echo "files=${files} lines=${lines} size=${size} ticket=${TICKET} mismatch=${mismatch}"
+echo "files=${files} lines=${lines} size=${size} ticket=${TICKET} mismatch=${mismatch} original=${ORIGINAL} accepted=${ACCEPTED}"
+comparison="ticket ${TICKET}"
+if [[ "${ACCEPTED}" == "true" ]]; then comparison="accepted L (original ticket M)"; fi
 if [[ "${size}" == "XL" ]]; then
-  echo "Size: beyond L (${files} files, ${lines} lines) vs ticket ${TICKET}"
+  echo "Size: beyond L (${files} files, ${lines} lines) vs ${comparison}"
 else
-  echo "Size: ${size} (${files} files, ${lines} lines) vs ticket ${TICKET}"
+  echo "Size: ${size} (${files} files, ${lines} lines) vs ${comparison}"
+fi
+if [[ "${ACCEPTED}" == "true" ]]; then
+  echo "**Accepted size correction**: original ticket M; accepted L — full founder read required before merge; no automerge. Preserve the complete Size Acceptance record in the PR."
 fi
 case "${mismatch}" in
   above)   echo "**Size mismatch**: the PR is one size above its ticket (${size} vs ${TICKET}) — founder decision required; do not merge on green checks alone." ;;

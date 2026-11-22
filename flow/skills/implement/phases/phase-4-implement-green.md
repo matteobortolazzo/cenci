@@ -54,7 +54,7 @@ A report without a `Verification (scoped)` or `Verification (full fallback)` res
 
 If the command or lint fails, analyze root cause, fix, and rerun. Retry up to 3 times, then stop, reporting exact errors, attempts, and best hypothesis. Lint failures are held to the same hard gate as test failures — no silent pass-through.
 
-**Context-budget signal.** A summary opening with `Context: low`, or a delegation that would need a second resume to finish the same work, is a split signal per Phase 3's `## Context Budget`: report it to the root agent and stop at the error gate `Context budget exceeded in lane <n>: <done>/<remaining>`, recommending `/cenci:refine <id>` (or `/cenci:refine <parentId>` for a split child). Never retry with a longer lane or a third delegation.
+**Context-budget signal.** A summary opening with `Context: low`, or a delegation that would need a second resume to finish the same work, is a split signal per Phase 3's `## Context Budget`: report it to the root agent and stop at the error gate `Context budget exceeded in lane <n>: <done>/<remaining>`, recommending `/cenci:refine <id>` (or `/cenci:refine <parentId>` for a split child). Before recovery/final stop run Phase 1's **Release the stopped implementation issue** on the source issue (original child when targeting its parent), preserving assignee/other labels; never in explicit Plan mode or ticketless mode. Never retry with a longer lane or a third delegation.
 
 ## Visual Verification
 
