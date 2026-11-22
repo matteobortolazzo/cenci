@@ -402,6 +402,11 @@ The only reasons to stop mid-pipeline are explicit error gates defined within in
 
 The detailed instructions for each phase live in `phases/`. Read only the file for the phase you are starting; do not pre-read later phase files.
 
+Phase 9 uses `scripts/accepted-size-hold.sh` for a validated Size Acceptance: revoke and
+verify the source issue's live automerge grant before PR creation and again before arming
+supervision, even when the final diff is S. Read and run it only on that path as directed
+by `phases/phase-9-pr.md`; a failed hold verification stops publication or arming.
+
 ### Cost Controls
 
 Read the resolved config for optional `cenci` settings:
