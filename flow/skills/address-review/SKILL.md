@@ -8,6 +8,18 @@ user-invocable: true
 allowed-tools: Read, Write, Edit, Glob, Grep, Task, AskUserQuestion, Bash(gh pr view:*), Bash(gh pr checkout:*), Bash(gh pr comment:*), Bash(gh pr edit:*), Bash(gh api repos/:*), Bash(gh issue view:*), Bash(cenci pipeline followup:*), Bash(git remote get-url:*), Bash(git worktree list:*), Bash(git pull --rebase:*), Bash(git diff --name-only:*), Bash(git add:*), Bash(git commit:*), Bash(git push origin:*), Bash(jq -n:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*), Bash(printenv CENCI_ATTENDED)
 ---
 
+> **Codex Plan-mode gate**: In Codex only (Claude Code ignores this block), evaluate this gate from this text alone, before any tool call and before the Client dispatch below. `<target>` is the PR number. When a refusal below applies, make no tool call (no read, no shell, no `require-runtime.sh`), print only that one line with no text before or after it (no skill-usage announcement, such as which skill you are using), and end the turn. Codex's own implement-the-plan turn right after a Plan-mode approval is a `persist`, never a planning request.
+>
+> Evaluated before refusal 1: a request that is neither `persist` nor `apply` and carries a `--receipt-nonce <32-hex>` argument is babysit's finite `babysit-review` launch, not a planning request: this gate does not refuse it, and it continues to the Client dispatch, where `address-review/codex.md`'s finite-branch gate decides. Refusals 2 and 3 still apply to a `persist` or `apply` that carries `--receipt-nonce`; any other request is an ordinary request.
+>
+> 1. A planning request (neither `persist` nor `apply`) whose `<collaboration_mode>` is not Plan, or cannot be read: `cenci: $cenci:address-review plans only in Plan mode — type /plan and resend: /plan $cenci:address-review <target>`
+> 2. A `persist` (Codex's own implement-the-plan turn right after a Plan-mode approval counts as `persist`) in a session that holds no Plan-mode-approved plan for `address-review <target>`: `cenci: no approved plan in this session — type /plan and resend: /plan $cenci:address-review <target>`
+> 3. A `persist` or `apply` sent while Plan mode is still active: `leave Plan mode and resend`
+>
+> Refusals 2 and 3 can both apply to one `persist` sent while Plan mode is still active, and refusal 3 wins: check Plan mode before checking for an approved plan.
+>
+> Otherwise no refusal applies; continue to the Client dispatch: a planning request in Plan mode, and in Default mode a `persist` with a Plan-mode-approved plan in this session, and an `apply`. `codex-runtime`'s **Approved-plan handoff** stays the full statement of these checks.
+
 > **Client dispatch**: In Codex, read `codex-runtime` and `address-review/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
 
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`. The one exception is the finite receipt branch below, which runs unattended and asks nothing.

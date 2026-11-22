@@ -656,6 +656,184 @@ require_in "R2 persist approval check" "$handoff_persist" 'no Plan-mode-approved
 order_in "R2 approval check precedes persist writes" "$handoff_persist" "$no_approved_plan" 'require-runtime.sh' 'Write the artifact'
 require_in "R2 docs approval refusal" "$docs_handoff" "$no_approved_plan"
 
+# --- Dispatcher Plan-mode gate (#1584) ---
+# The refusals must run from text already in context, so each planning SKILL.md carries a Codex-only gate
+# blockquote before its Client dispatch line (reading `codex-runtime` is itself a tool call). The concrete
+# literals are derived from codex-runtime's canonical `<wf>` strings, so all seven sites stay the same (#979).
+plan_only_line='cenci: $cenci:<wf> plans only in Plan mode — type /plan and resend: /plan $cenci:<wf> <target>'
+require_in "#1584 canonical self-check literal" "$handoff_self_check" "$plan_only_line"
+require_in "#1584 canonical persist literal" "$handoff_persist" "$no_approved_plan"
+# handoff_target <wf>: the target form, worded as in codex-runtime's **Target** bullet (pure; prints nothing for an unknown workflow)
+handoff_target(){
+  case "$1" in
+    configure|refactor) printf '%s' '`repo`' ;;
+    refine) printf '%s' 'the ticket number' ;;
+    implement) printf '%s' 'the ticket id, or the task slug in ticketless mode' ;;
+    address-review) printf '%s' 'the PR number' ;;
+    maintain) printf '%s' '`<mode>`, or `<mode>-<scope>` when a scope is given' ;;
+    *) return 1 ;;
+  esac
+}
+for wf in $handoff_workflows; do
+  require_in "#1584 ${wf} target form is the one in codex-runtime's Target bullet" "$handoff_intro" "$(handoff_target "$wf")"
+done
+# gate_text <raw content>: the gate blockquote with its `>` markers stripped and folded to one line, so a phrase wrapped
+# across `>` lines still matches. Pure: no fail, so it is safe inside $(...). Ends at the first non-`>` line.
+gate_text(){
+  awk 'index($0,"> **Codex Plan-mode gate**")==1{on=1} on && !/^>/{exit} on{sub(/^> ?/,""); print}' <<<"$1" | tr '\n' ' ' | tr -s ' '
+}
+# fold_text <raw content>: the whole content with newlines folded (pure)
+fold_text(){ tr '\n' ' ' <<<"$1" | tr -s ' '; }
+# gate_literals <wf>: the three concrete refusal literals of that workflow's gate, one per line (pure)
+gate_literals(){
+  printf '%s\n' "${plan_only_line//'<wf>'/"$1"}" "${no_approved_plan//'<wf>'/"$1"}" 'leave Plan mode and resend'
+}
+# gate_clauses <wf>: "<label>|<clause>" lines for the clauses of that workflow's gate that keep the refusals scoped (pure).
+# Each numbered refusal line is one folded string (condition + colon + literal, with the concrete workflow substituted from the
+# canonical strings), so a dropped condition or swapped literals fails. The address-review carve-out is pinned the same way.
+gate_clauses(){
+  local plan_line="${plan_only_line//'<wf>'/"$1"}" no_plan_line="${no_approved_plan//'<wf>'/"$1"}"
+  printf '%s\n' \
+    'refusal 1 line|1. A planning request (neither `persist` nor `apply`) whose `<collaboration_mode>` is not Plan, or cannot be read: `'"$plan_line"'`' \
+    'refusal 2 line|2. A `persist` (Codex'"'"'s own implement-the-plan turn right after a Plan-mode approval counts as `persist`) in a session that holds no Plan-mode-approved plan for `'"$1"' <target>`: `'"$no_plan_line"'`' \
+    'refusal 3 line|3. A `persist` or `apply` sent while Plan mode is still active: `leave Plan mode and resend`' \
+    'persist no-approved-plan condition|in a session that holds no Plan-mode-approved plan for `'"$1"' <target>`' \
+    'implement-the-plan turn is a persist|Codex'"'"'s own implement-the-plan turn right after a Plan-mode approval is a `persist`, never a planning request.' \
+    'precedence of refusal 3 over 2|Refusals 2 and 3 can both apply to one `persist` sent while Plan mode is still active, and refusal 3 wins: check Plan mode before checking for an approved plan.' \
+    'continuation planning request|Otherwise no refusal applies; continue to the Client dispatch: a planning request in Plan mode,' \
+    'Default-mode exemption|in Default mode a `persist` with a Plan-mode-approved plan in this session, and an `apply`'
+  if [[ "$1" == address-review ]]; then
+    printf '%s\n' \
+      'nonce carve-out condition|Evaluated before refusal 1: a request that is neither `persist` nor `apply` and carries a `--receipt-nonce <32-hex>` argument is babysit'"'"'s finite `babysit-review` launch, not a planning request' \
+      'nonce carve-out action|this gate does not refuse it, and it continues to the Client dispatch, where `address-review/codex.md`'"'"'s finite-branch gate decides' \
+      'nonce carve-out scope|Refusals 2 and 3 still apply to a `persist` or `apply` that carries `--receipt-nonce`; any other request is an ordinary request.'
+  fi
+}
+# Wordings injected by the self-test below to prove a gate that orders the `codex-runtime` read is caught
+GATE_READ_PHRASES=('read `codex-runtime`' 'reading `codex-runtime`' 'read the `codex-runtime` skill')
+# check_gate <wf> <raw content>: calls fail in the calling shell, so never run it inside $(...) except the discarded self-test subshell
+check_gate(){
+  local wf="$1" raw="$2" gate whole target phrase label pointer
+  gate="$(gate_text "$raw")"
+  whole="$(fold_text "$raw")"
+  target="$(handoff_target "$wf")" || { fail "#1584 ${wf}/SKILL.md: no target form is defined for this workflow"; return; }
+  for phrase in '**Codex Plan-mode gate**' "${plan_only_line//'<wf>'/"$wf"}" "${no_approved_plan//'<wf>'/"$wf"}" 'leave Plan mode and resend' \
+    'before any tool call' 'no tool call' 'no read, no shell, no `require-runtime.sh`' 'no text before or after it' \
+    'no skill-usage announcement' 'end the turn' \
+    'neither `persist` nor `apply`' 'cannot be read' 'implement-the-plan turn' 'continue to the Client dispatch' \
+    'Claude Code ignores this block' '`<target>` is '"$target"; do
+    require_in "#1584 ${wf}/SKILL.md gate" "$gate" "$phrase"
+  done
+  if [[ "$wf" == address-review ]]; then
+    for phrase in '`--receipt-nonce`' 'not a planning request'; do
+      require_in "#1584 ${wf}/SKILL.md gate" "$gate" "$phrase"
+    done
+  fi
+  # The three clauses that keep the refusals scoped: each has its own label so the self-test below can prove it is pinned.
+  while IFS='|' read -r label phrase; do
+    require_in "#1584 ${wf}/SKILL.md gate ${label}" "$gate" "$phrase"
+  done < <(gate_clauses "$wf")
+  # The gate itself never orders the read, in any wording; it is evaluated before the dispatch line orders it. An allowlist, not a
+  # denylist of read verbs: the one allowed mention of the skill is the trailing pointer to `codex-runtime`'s **Approved-plan handoff**
+  # (asserted present); with it removed, the bare token `codex-runtime` must not occur anywhere else in the gate (`require-runtime.sh`
+  # does not contain it).
+  pointer="\`codex-runtime\`'s **Approved-plan handoff**"
+  require_in "#1584 ${wf}/SKILL.md gate keeps its pointer to the canonical handoff" "$gate" "$pointer"
+  forbid_in "#1584 ${wf}/SKILL.md gate names codex-runtime only in its handoff pointer" "${gate//"$pointer"/}" 'codex-runtime'
+  # a blockquote separator line merged into the end of the previous paragraph leaves a stray `>` after a sentence end
+  forbid_in "#1584 ${wf}/SKILL.md gate" "$gate" 'plan.>'
+  order_in "#1584 ${wf}/SKILL.md gate precedes the Client dispatch" "$whole" '> **Codex Plan-mode gate**' \
+    "In Codex, read \`codex-runtime\` and \`${wf}/codex.md\`"
+}
+# expect_caught <wf> <mutated content> <expected failure, the text after "FAIL: "> <what was mutated>: the mutated content must make
+# check_gate print that exact failure, i.e. its OWN assertion and not a neighbour's. The subshell discards check_gate's failure counter
+# on purpose and only its stderr is inspected: a fail() inside $(...) loses its counter (the "Self-test harnesses" bullet, trap 1, in
+# docs/shell-scripting-gotchas.md). The only fail() here runs in the calling shell, on the branch where a regression went uncaught.
+expect_caught(){
+  local out
+  out="$( (check_gate "$1" "$2") 2>&1 >/dev/null )"
+  [[ "$out" == *"FAIL: $3"* ]] || fail "#1584 $1/SKILL.md self-test: $4 was not caught by its own assertion ('$3')"
+}
+NL=$'\n'
+for wf in $handoff_workflows; do
+  skill="${ROOT}/skills/${wf}/SKILL.md"
+  content="$(cat "$skill")" || { fail "#1584 ${wf}/SKILL.md: cannot read ${skill}"; continue; }
+  check_gate "$wf" "$content"
+  # Self-test (non-vacuity): deleting any one concrete literal must trip that literal's own `gate: missing '<literal>'` assertion.
+  # fail is reached only when a regression goes uncaught, or when the literal was never there to delete.
+  while IFS= read -r lit; do
+    mutated="${content//"$lit"/}"
+    if [[ "$mutated" == "$content" ]]; then
+      fail "#1584 ${wf}/SKILL.md self-test: literal '${lit}' is absent, so deleting it proves nothing"
+      continue
+    fi
+    expect_caught "$wf" "$mutated" "#1584 ${wf}/SKILL.md gate: missing '${lit}'" "deleting literal '${lit}'"
+  done < <(gate_literals "$wf")
+  # The same self-test for the clauses that keep the refusals scoped, which must trip their own labelled assertion.
+  while IFS='|' read -r label lit; do
+    mutated="${content//"$lit"/}"
+    if [[ "$mutated" == "$content" ]]; then
+      fail "#1584 ${wf}/SKILL.md self-test: clause '${label}' is absent, so deleting it proves nothing"
+      continue
+    fi
+    expect_caught "$wf" "$mutated" "#1584 ${wf}/SKILL.md gate ${label}: missing '${lit}'" "deleting clause '${label}'"
+  done < <(gate_clauses "$wf")
+  # order_in self-test: the gate block moved after the Client dispatch line must trip the order assertion.
+  gate_block="$(awk 'index($0,"> **Codex Plan-mode gate**")==1{on=1} on && !/^>/{exit} on{print}' <<<"$content")"
+  mutated="$(GATE_BLOCK="$gate_block" awk 'index($0,"> **Codex Plan-mode gate**")==1{on=1} on && !/^>/{on=0} on{next} {print} index($0,"> **Client dispatch**")==1{print ""; print ENVIRON["GATE_BLOCK"]}' <<<"$content")"
+  if [[ -z "$gate_block" || "$mutated" == "$content" ]]; then
+    fail "#1584 ${wf}/SKILL.md self-test: the gate block could not be moved after the Client dispatch line, so the order assertion is unproven"
+  else
+    expect_caught "$wf" "$mutated" "#1584 ${wf}/SKILL.md gate precedes the Client dispatch: " "moving the gate after the Client dispatch line"
+  fi
+  # forbid_in self-test: a gate that names `codex-runtime` anywhere but its handoff pointer, in any wording (including a capitalised
+  # `Read` and a verb outside the listed ones), must trip the allowlist assertion.
+  for phrase in "${GATE_READ_PHRASES[@]}" 'Read `codex-runtime`' 'load `codex-runtime`'; do
+    mutated="${content/'end the turn.'/"end the turn. Then ${phrase}."}"
+    if [[ "$mutated" == "$content" ]]; then
+      fail "#1584 ${wf}/SKILL.md self-test: could not inject '${phrase}' into the gate, so the forbid assertion is unproven"
+      continue
+    fi
+    expect_caught "$wf" "$mutated" "#1584 ${wf}/SKILL.md gate names codex-runtime only in its handoff pointer: must not contain 'codex-runtime'" "injecting '${phrase}' into the gate"
+  done
+  # forbid_in self-test: re-merging the blockquote separator into the precedence sentence (`approved plan.` then a `>` line becoming
+  # `approved plan.>`) must trip the stray-`>` assertion.
+  mutated="${content/"approved plan.${NL}>"/approved plan.>}"
+  if [[ "$mutated" == "$content" ]]; then
+    fail "#1584 ${wf}/SKILL.md self-test: the separator line after the precedence sentence could not be re-merged, so the stray '>' assertion is unproven"
+  else
+    expect_caught "$wf" "$mutated" "#1584 ${wf}/SKILL.md gate: must not contain 'plan.>'" "re-merging the separator into the precedence sentence"
+  fi
+  # Carve-out self-test: address-review's `--receipt-nonce` paragraph removed must be caught by the carve-out's own assertion.
+  if [[ "$wf" == address-review ]]; then
+    mutated="$(grep -vF -- '> Evaluated before refusal 1' <<<"$content")"
+    if [[ "$mutated" == "$content" ]]; then
+      fail "#1584 ${wf}/SKILL.md self-test: the --receipt-nonce carve-out paragraph is absent, so removing it proves nothing"
+    else
+      expect_caught "$wf" "$mutated" "#1584 ${wf}/SKILL.md gate nonce carve-out condition: missing" "removing the --receipt-nonce carve-out"
+    fi
+  fi
+done
+# The five non-planning dispatchers stay gate-free.
+for wf in review sync close ci-repair babysit-attention; do
+  forbid_in "#1584 ${wf}/SKILL.md carries no Plan-mode gate" "$(normalize "${ROOT}/skills/${wf}/SKILL.md")" '**Codex Plan-mode gate**'
+done
+# codex-runtime stays canonical and says the dispatcher gate runs both checks before it is read; the docs say the same.
+require_in "#1584 codex-runtime self-check names the dispatcher gate" "$handoff_self_check" 'dispatcher gate'
+require_in "#1584 codex-runtime self-check runs before the read" "$handoff_self_check" 'runs this check before `codex-runtime` is read'
+require_in "#1584 codex-runtime persist approval check runs before the read" "$handoff_persist" 'runs this approval check before `codex-runtime` is read'
+require_in "#1584 docs refusals run from the dispatcher" "$docs_handoff" "run from the planning skill's own dispatcher text"
+require_in "#1584 docs refusals run before any read" "$docs_handoff" 'before any file is read'
+# The third refusal (`leave Plan mode and resend`) runs from the dispatcher gate too, and is checked before the approval check (#979 mirror).
+require_in "#1584 codex-runtime self-check runs the third refusal from the gate before the approval check" "$handoff_self_check" \
+  'The dispatcher gate also runs the `leave Plan mode and resend` refusal before `codex-runtime` is read, so it makes no tool call, and it checks it before the Persist step'"'"'s approval check: a `persist` sent while Plan mode is still active gets that line, never the no-approved-plan line.'
+require_in "#1584 codex-runtime persist approval check classifies the implement-the-plan turn as persist" "$handoff_persist" \
+  "Codex's own implement-the-plan turn right after a Plan-mode approval is a \`persist\`, never a planning request."
+require_in "#1584 codex-runtime persist approval check yields to the Plan-mode refusal" "$handoff_persist" \
+  'A `persist` sent while Plan mode is still active is refused first, with `leave Plan mode and resend`, before this check.'
+require_in "#1584 docs name the third refusal as running from the dispatcher" "$docs_handoff" \
+  "and the \`leave Plan mode and resend\` refusal all run from the planning skill's own dispatcher text"
+
 # R4: implement's artifact is the planner's plan file; the Target/Approved Plan wrapper is for the other five workflows.
 # The shape is stated once, in codex-runtime's Persist step (#979 restatement rule); implement/codex.md only references it.
 for phrase in 'for implement the artifact is the planner'"'"'s plan file' 'YAML front matter (`---` as the first line)' \
