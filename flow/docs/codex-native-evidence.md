@@ -307,15 +307,32 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-workflows.md bash flow/code
 
 ## Native workflows: Plan mode, handoff and goal lifecycle
 
-**Status: pending native run.** The same runner (`codex/native-workflows.test.sh`) now also
-covers the Plan-mode self-check, the new-process plan to apply handoff and the goal lifecycle
+**Status: recorded, `RESULT: FAIL (5 failed rows)`.** The same runner (`codex/native-workflows.test.sh`)
+also covers the Plan-mode self-check, the new-process plan to apply handoff and the goal lifecycle
 (#1235). Its not-run gates, its judge and every misbehaviour it must catch are pinned in CI
-against a stub `codex` (`codex/native-workflows.gate.test.sh`), but no run against a real Codex
-binary has been recorded. Every cell below is a placeholder, not evidence, until the maintainer
-commits a sanitized run, and the interactive Plan-mode record, to the same PR as the runner.
-The acceptance criterion for this section (D7) stays unchecked until then, and the PR is not
-merged before it. Nothing in `codex.md` or `adapter-contract.md` may cite this section as
-verified before then.
+against a stub `codex` (`codex/native-workflows.gate.test.sh`). The record below is the sanitized
+native run on a real Codex binary (`codex-cli 0.171.0`, #1395), copied from the owner's #1395
+comment and not judged again.
+
+- **Counts**: the runner reported `ok=4 failed=5 inconclusive=21 not-run=3` across the run shared
+  with #1396. All five failed rows are in this section.
+  This section's 17 verbatim rows account for all 4 `ok` and all 5 `FAIL` results and 8 of the 21 `inconclusive` results; the remaining 13 `inconclusive` and 3 `not-run` results of that shared run are not committed in this section (they are not recorded here).
+- **Exit code**: it was not captured, because another shell command ran before it could be read.
+  `RESULT: FAIL` maps to exit 1 by the runner's contract; that is inferred from the runner, not
+  observed.
+- **Retention**: the first completed run is retained. Failures were not rerun away.
+- **Still `FAIL`**: the Plan-mode self-check and the fresh-process `persist` printed extra output
+  and made 2 tool calls before the refusal line ([#1584](https://github.com/matteobortolazzo/cenci/issues/1584)),
+  and the tampered-artifact `apply` did not print the digest-mismatch line
+  ([#1585](https://github.com/matteobortolazzo/cenci/issues/1585)).
+- **Still `inconclusive`**: the tampered-artifact zero-writes row, goal create then complete, and
+  goal skip (no goal tool calls were visible to `codex exec`).
+- **Not observed**: the interactive `persist` positive path (the guard canary refused first) and
+  both Codex refusal messages.
+- **Acceptance**: this record does not tick D7 or D8 of #1193. The owner of #1193 judges them.
+- **Citation rule**: other docs may cite only the rows below that read `ok`, or interactive rows
+  whose Observed matches Expected, and must name a scenario's `FAIL` or `inconclusive` result in
+  the same sentence as any of its `ok` sub-rows.
 
 The goal rows need a Codex whose `codex exec` exposes the goal tools (`get_goal`, `create_goal`,
 `update_goal`). When it does not, those rows are `inconclusive` (and the run is `RESULT:
@@ -396,20 +413,48 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-workflows.md bash flow/code
 
 | Field | Value |
 |---|---|
-| Codex version | pending native run |
-| Flow plugin version / commit (installed) | pending native run |
-| Host or sandbox | pending native run |
-| Hook trust | pending native run |
+| Codex version | `codex-cli 0.171.0` |
+| Flow plugin version / commit (installed) | `cenci@cenci` installed and enabled, `1.38.1` / `706da87ddbbcd32da6aa050b32eb9ed76f67ece1`; the commit was resolved from the marketplace source checkout and byte-compared with the installed `1.38.1` cache (its `flow/` directory: no differences). `codex plugin list` supplied the version and source but printed no commit. |
+| Installed plugin source | `<HOME>/.codex/.tmp/marketplaces/cenci/flow` |
+| Runner checkout commit | `706da87ddbbcd32da6aa050b32eb9ed76f67ece1` |
+| Host or sandbox | host |
+| Hook trust | all cenci hooks trusted through `/hooks`; no bypass flag (owner-confirmed for the installed version) |
+| Exit code | not captured; `RESULT: FAIL` maps to exit 1 (inferred from the runner, not observed); another shell command ran before the status could be read |
 
 | Scenario | Result |
 |---|---|
-| Startup-control probe: Plan or collaboration-mode option found or not found | pending native run |
-| Plan-mode self-check in Default mode: exact refusal line, zero tool calls, nothing written | pending native run |
-| Fresh-process `persist`: exact refusal line, zero tool calls, nothing written | pending native run |
-| New-process `apply` on a runner-persisted artifact and checkpoint: `verify` passes, checkpoint advances | pending native run |
-| New-process `apply` on a tampered artifact: digest-mismatch line, zero writes | pending native run |
-| Goal create then complete: one `create_goal`, `goal=created`, `update_goal complete` after `gh pr create` and before `cenci babysit` | pending native run |
-| Goal skip: no `create_goal`, no `update_goal`, `goal=skipped-active` with status `needs-input` | pending native run |
+| Startup-control probe: Plan or collaboration-mode option found or not found | `ok`: the probe found one candidate, `codex features list: collaboration_modes removed true`; no startup control was version-verified |
+| Plan-mode self-check in Default mode: exact refusal line, zero tool calls, nothing written | `FAIL`: the refusal line was printed with other output, and the run made 2 tool calls before refusing; the nothing-written row is `ok` ([#1584](https://github.com/matteobortolazzo/cenci/issues/1584)) |
+| Fresh-process `persist`: exact refusal line, zero tool calls, nothing written | `FAIL`: the refusal line was printed with other output, and the run made 2 tool calls before refusing; the nothing-written row is `ok` ([#1584](https://github.com/matteobortolazzo/cenci/issues/1584)) |
+| New-process `apply` on a runner-persisted artifact and checkpoint: `verify` passes, checkpoint advances | `ok`: the runner-persisted checkpoint advanced to status=needs-input, phase=tests, goal=none (codex rc=0) |
+| New-process `apply` on a tampered artifact: digest-mismatch line, zero writes | `FAIL`: the apply did not report the digest mismatch; the zero-writes row is `inconclusive`: nothing changed, but nothing shows the apply refused ([#1585](https://github.com/matteobortolazzo/cenci/issues/1585)) |
+| Goal create then complete: one `create_goal`, `goal=created`, `update_goal complete` after `gh pr create` and before `cenci babysit` | `inconclusive`: no goal events (no `get_goal`, `create_goal` or `update_goal` call in the 1 rollout file or the event stream); the goal tools may not be exposed by `codex exec` at this version, or the rollout could not be read; the checkpoint records goal=none |
+| Goal skip: no `create_goal`, no `update_goal`, `goal=skipped-active` with status `needs-input` | `inconclusive`: no `create_goal` call was seen in the seeding turn (codex rc=0), so no goal exists to skip |
+
+#### Verbatim runner rows
+
+The runner's own `scenario | result | detail` rows for this section, as copied from the #1395
+comment (sanitized; details are truncated by the runner).
+
+| scenario | result | detail |
+|---|---|---|
+| startup-control probe: Plan/collaboration-mode option recorded | ok | found a candidate Plan/collaboration-mode option: codex features list: collaboration_modes removed true . A version-verified startup control is filed as a Followup, not added to this ticket. Goal-related features listed: goals stable true . |
+| plan-mode self-check: exact refusal line printed | FAIL | the refusal line was printed with other output after or before it: 'I’m using the cenci implement skill and will follow its native Codex planning procedure for `native-note`. cenci: $cenci:implement plans only in Plan mode — type /plan and resend: /plan $cenci:impleme' |
+| plan-mode self-check: zero tool calls | FAIL | the run made 2 tool call(s) before refusing: exec text(await tools.exec_command({cmd:"cat <HOME>/.codex/plugins/cache/cenci/cenci;shell cat <HOME>/.codex/plugins/cache/cenci/cenci/1.38.1/skills/codex-runtime/SKILL.; |
+| plan-mode self-check: nothing written | ok | git status --ignored and the refs are unchanged: no .cenci, .plans or worktree was written |
+| persist (fresh process): exact refusal line printed | FAIL | the refusal line was printed with other output after or before it: 'I’m using the cenci implement skill and will follow its native Codex workflow for `persist native-note`. cenci: no approved plan in this session — type /plan and resend: /plan $cenci:implement native-' |
+| persist (fresh process): zero tool calls | FAIL | the run made 2 tool call(s) before refusing: exec text(await tools.exec_command({cmd:"cat <HOME>/.codex/plugins/cache/cenci/cenci;shell cat <HOME>/.codex/plugins/cache/cenci/cenci/1.38.1/skills/codex-runtime/SKILL.; |
+| persist (fresh process): nothing written | ok | git status --ignored and the refs are unchanged: no .cenci, .plans or worktree was written |
+| apply (tampered artifact): digest-mismatch line printed | FAIL | the apply on a tampered artifact did not report the digest mismatch: 'I’m using the cenci implementation skill and will check its native Codex procedure for applying `native-note`. Apply stopped: `.plans/native-note.md` has changed since approval, so its digest no longe' |
+| apply (tampered artifact): zero writes | inconclusive | nothing changed, but nothing shows the apply refused |
+| apply (new process): verify passes and the checkpoint advances past planned | ok | new-process apply advanced the runner-persisted checkpoint: status=needs-input, phase=tests, goal=none (codex rc=0) |
+| goal create: create_goal once, with the approved-plan objective | inconclusive | no goal events (no get_goal, create_goal or update_goal call in the 1 rollout file(s) or the event stream): the goal tools may not be exposed by codex exec at this version, or the rollout could not be read |
+| goal create: checkpoint records goal=created | inconclusive | no goal events (no get_goal, create_goal or update_goal call in the 1 rollout file(s) or the event stream): the goal tools may not be exposed by codex exec at this version, or the rollout could not be read (the checkpoint records goal=none) |
+| goal complete: update_goal complete only after a successful gh pr create | inconclusive | no goal events (no get_goal, create_goal or update_goal call in the 1 rollout file(s) or the event stream): the goal tools may not be exposed by codex exec at this version, or the rollout could not be read |
+| goal complete: update_goal complete before cenci babysit | inconclusive | no goal events (no get_goal, create_goal or update_goal call in the 1 rollout file(s) or the event stream): the goal tools may not be exposed by codex exec at this version, or the rollout could not be read |
+| goal skip: no create_goal while a goal exists | inconclusive | no goal events: no create_goal call was seen in the seeding turn (codex rc=0), so no goal exists to skip; the goal tools may not be exposed by codex exec at this version |
+| goal skip: no update_goal | inconclusive | no goal events: no create_goal call was seen in the seeding turn (codex rc=0), so no goal exists to skip; the goal tools may not be exposed by codex exec at this version |
+| goal skip: checkpoint records skipped-active and needs-input | inconclusive | no goal events: no create_goal call was seen in the seeding turn (codex rc=0), so no goal exists to skip; the goal tools may not be exposed by codex exec at this version |
 
 ### Interactive Plan-mode record
 
@@ -418,15 +463,38 @@ positive path in the TUI, on the same installed plugin and Codex version as the 
 commits it with the run. Record what happened, including a message that differs from the
 expected one.
 
+Recorded with the same Codex and installed flow plugin versions as above, in a disposable
+ticketless Git repository at `<FIXTURE>` with no remote configured.
+
+Preparation note: the first planning attempt stopped because neither `.cenci/config.json` nor
+`.claude/config.json` existed, and reported no files changed. The owner then seeded
+`.cenci/config.json` with `{"gateCommand":"true"}` and committed it, before the measured planning
+attempt in a fresh TUI session. These fixture setup writes are not attributed to `/plan` or
+`persist`.
+
 | Step | Expected | Observed |
 |---|---|---|
-| `/plan $cenci:implement <target>` in the TUI | plans; no project file, checkpoint, `.plans` file, label, ticket or `cenci pipeline` write | pending native run |
-| `$cenci:implement persist <target>` in the same session after approving the plan | writes only the plan artifact and the checkpoint; no worktree, claim, label or GitHub write | pending native run |
-| Message when collaboration modes are disabled ("Collaboration modes are disabled") | observed text, or not observed | pending native run |
-| Message when Plan mode cannot be entered ("Plan mode unavailable right now") | observed text, or not observed | pending native run |
+| `/plan $cenci:implement <target>` in the TUI | plans; no project file, checkpoint, `.plans` file, label, ticket or `cenci pipeline` write | Plan mode planned: it produced the plan "Add README evidence" (target slug `add-readme-native-plan-mode`) for the requested root `README.md` text. Before approval `git status --porcelain --ignored` was empty, HEAD stayed at the seed commit and the worktree list held only the original checkout: no project file, checkpoint, `.plans`, worktree, label, ticket, GitHub or `cenci pipeline` write (the owner confirmed no label, ticket, GitHub or `cenci pipeline` write). |
+| `$cenci:implement persist <target>` in the same session after approving the plan | writes only the plan artifact and the checkpoint; no worktree, claim, label or GitHub write | refused at guard canary preflight (exit 1): the owner chose "Yes, implement this plan" to switch to Default mode, interrupted (a filesystem check showed no writes), then sent the explicit `persist` command in the same session. It ran require-runtime, read the runtime skill and config, and stopped at the guard canary. No plan artifact, checkpoint, project file or worktree was written, Git status stayed empty and HEAD stayed at the seed commit; the owner confirmed no claim, label, ticket, GitHub or `cenci pipeline` write. Result: positive path not exercised (`apply` was not run). Refusal text below. |
+| Message when collaboration modes are disabled ("Collaboration modes are disabled") | observed text, or not observed | not observed in the supplied interactive record |
+| Message when Plan mode cannot be entered ("Plan mode unavailable right now") | observed text, or not observed | not observed in the supplied interactive record; Plan mode was entered and produced a plan |
+
+Interactive `persist` refusal, as reported by the TUI:
+
+```text
+CANARY_STATUS=refused
+Guard canary refused: the probe self-check failed against the real guard scripts: probe 2 (apply_patch): guard-main-worktree should deny its own probe (exit 2 with 'targets the main worktree') but exited 0. This is expected when the repository is not configured for cenci, lives under /tmp, or a guard script is broken.
+The cenci write guards are not confirmed active, so do not start any mutation.
+If the hooks are pending or untrusted in Codex, review them with /hooks and rerun.
+```
+
+The fixture was under `/tmp`. That is a condition the diagnostic names; this record does not
+establish a separate root-cause diagnosis. The refusal is retained as observed, without bypassing
+the guard or retrying it away.
 
 A startup control found by the probe (or by this record) that is version-verified is filed as a
-`Followup` against the Plan-mode handoff, not added to the ticket that produced the record.
+`Followup` against the Plan-mode handoff, not added to the ticket that produced the record. Here
+the probe's only candidate (`codex features list: collaboration_modes removed true`) is not a version-verified startup control, so no `Followup` is filed.
 
 ## Native agent roles: inherit, override, unavailable model
 

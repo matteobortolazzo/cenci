@@ -869,7 +869,7 @@ for goal_case in 'existing goal' 'no goal' 'no tools' 'ambiguity' 'red baseline'
   [[ -n "$(goal_row "$runtime" "$goal_case")" ]] || fail "D6 Goal cases table has no row for '${goal_case}'"
 done
 goal_root="$(mktemp -d /var/tmp/cenci-goal-fixtures.XXXXXX)" || { echo "workflows.test.sh: mktemp failed (goal fixtures)." >&2; exit 2; }
-trap 'rm -rf "$goal_root"' EXIT
+trap 'rm -rf "$goal_root"; if [[ -n "${native_tmp:-}" && -d "$native_tmp" ]]; then rm -rf "$native_tmp"; fi' EXIT
 GOAL_CKPT_JS="${ROOT}/codex/checkpoint.mjs"
 GOAL_REL=".cenci/checkpoints/implement-42-demo.json"
 GOAL_REPO=""
@@ -1011,9 +1011,171 @@ require_in "D1 codex-runtime only a human-started apply creates a goal" "$(secti
 forbid_in "D1 codex-runtime retired unattended-launch goal wording" "$(section "$runtime" '## Goal lifecycle')" 'neither does any unattended launch'
 forbid_in "D8 docs/codex.md retired goal wording" "$codex_docs_all" 'a native goal armed only after plan approval'
 forbid_in "D8 docs/codex.md evidence pointer" "$codex_docs_all" 'tracked in #1235'
-# The evidence section stays "pending native run" until a maintainer commits one, so no sentence may claim it is recorded there.
-forbid_in "D8 docs/codex.md evidence not yet recorded" "$codex_docs_all" "recorded in [\`codex-native-evidence.md\`](${goal_evidence_link})"
-require_in "D8 docs/codex.md evidence pending wording" "$codex_docs_all" "tracked in [\`codex-native-evidence.md\`](${goal_evidence_link}), pending the maintainer's native run"
+# The native run is recorded (#1397): docs/codex.md says so, and the retired "pending the maintainer's native run" pointer is gone.
+require_in "D8 docs/codex.md evidence recorded wording" "$codex_docs_all" "recorded in [\`codex-native-evidence.md\`](${goal_evidence_link})"
+forbid_in "D8 docs/codex.md retired evidence pending wording" "$codex_docs_all" "tracked in [\`codex-native-evidence.md\`](${goal_evidence_link}), pending the maintainer's native run"
+# The recorded section runs from its exact `##` heading to the next `## ` heading OUTSIDE a code fence, so unlike
+# `section` it spans its `###` subsections and never reads the `ci-repair` section's `### Results` table (that
+# section still reads "pending native run" and belongs to #1398). It fails closed when the heading is missing,
+# repeated or never terminated. See docs/shell-scripting-gotchas.md (fence-aware extractors, non-vacuity self-test).
+native_evidence="${ROOT}/docs/codex-native-evidence.md"
+native_heading='## Native workflows: Plan mode, handoff and goal lifecycle'
+native_awk='/^[[:space:]]*(```|~~~)/ { infence = !infence }
+  !infence && $0 == h { if (seen) { dup = 1; exit } seen = 1; on = 1; next }
+  on && !infence && /^## / { on = 0; ended = 1; next }
+  on { print }
+  END { exit ((seen && ended && !dup) ? 0 : 3) }'
+native_scope="$(awk -v h="$native_heading" "$native_awk" "$native_evidence" | tr '\n' ' ' | tr -s ' ')" \
+  || { fail "D8 evidence section: extraction failed (heading missing, repeated or unterminated)"; native_scope=""; }
+forbid_in "D8 evidence section has no pending native run" "$native_scope" 'pending native run'
+require_in "D8 evidence section scope spans its subsections" "$native_scope" '### Interactive Plan-mode record'
+# Every verbatim runner row is pinned by its result column: 17 rows, 4 ok, 5 FAIL, 8 inconclusive. An empty extraction
+# counts zero rows and fails, so a vanished subsection cannot pass.
+native_lines="$(awk -v h="$native_heading" "$native_awk" "$native_evidence")" \
+  || { fail "D8 evidence verbatim rows: line extraction failed"; native_lines=""; }
+native_rows="$(awk '/^#### Verbatim runner rows$/ { on = 1; next } on && /^#+ / { exit } on && /^\| / { print }' <<< "$native_lines")"
+native_counts="$(awk -F'|' 'NF < 3 { next } { r = $3; gsub(/^ +| +$/, "", r) } r == "result" || r ~ /^-+$/ { next } { n[r]++; t++ }
+  END { printf "ok=%d FAIL=%d inconclusive=%d total=%d", n["ok"], n["FAIL"], n["inconclusive"], t }' <<< "$native_rows")"
+[[ "$native_counts" == 'ok=4 FAIL=5 inconclusive=8 total=17' ]] \
+  || fail "D8 evidence verbatim rows: expected [ok=4 FAIL=5 inconclusive=8 total=17] by result column, got [${native_counts}]"
+for phrase in '| plan-mode self-check: exact refusal line printed | FAIL |' '| plan-mode self-check: zero tool calls | FAIL |' \
+  '| persist (fresh process): exact refusal line printed | FAIL |' '| persist (fresh process): zero tool calls | FAIL |' \
+  '| apply (tampered artifact): digest-mismatch line printed | FAIL |'; do
+  require_in "D8 evidence verbatim row stays FAIL: ${phrase}" "$native_rows" "$phrase"
+done
+# The 12 non-FAIL rows are pinned by identity too (scenario plus result), so a result swapped between rows keeps the counts but fails here.
+for phrase in '| startup-control probe: Plan/collaboration-mode option recorded | ok |' '| plan-mode self-check: nothing written | ok |' \
+  '| persist (fresh process): nothing written | ok |' '| apply (new process): verify passes and the checkpoint advances past planned | ok |' \
+  '| apply (tampered artifact): zero writes | inconclusive |' '| goal create: create_goal once, with the approved-plan objective | inconclusive |' \
+  '| goal create: checkpoint records goal=created | inconclusive |' '| goal complete: update_goal complete only after a successful gh pr create | inconclusive |' \
+  '| goal complete: update_goal complete before cenci babysit | inconclusive |' '| goal skip: no create_goal while a goal exists | inconclusive |' \
+  '| goal skip: no update_goal | inconclusive |' '| goal skip: checkpoint records skipped-active and needs-input | inconclusive |'; do
+  require_in "D8 evidence verbatim row identity: ${phrase}" "$native_rows" "$phrase"
+done
+for phrase in '| Plan-mode self-check in Default mode: exact refusal line, zero tool calls, nothing written | `FAIL`:' \
+  '| Fresh-process `persist`: exact refusal line, zero tool calls, nothing written | `FAIL`:' \
+  '| New-process `apply` on a tampered artifact: digest-mismatch line, zero writes | `FAIL`:' \
+  '| Startup-control probe: Plan or collaboration-mode option found or not found | `ok`:' \
+  '| New-process `apply` on a runner-persisted artifact and checkpoint: `verify` passes, checkpoint advances | `ok`:' \
+  '| Goal create then complete: one `create_goal`, `goal=created`, `update_goal complete` after `gh pr create` and before `cenci babysit` | `inconclusive`:' \
+  '| Goal skip: no `create_goal`, no `update_goal`, `goal=skipped-active` with status `needs-input` | `inconclusive`:' \
+  'the zero-writes row is `inconclusive`: nothing changed, but nothing shows the apply refused'; do
+  require_in "D8 evidence scenario cell: ${phrase}" "$native_scope" "$phrase"
+done
+# The shared-run counts are explained as arithmetic over the committed rows (the rest of that run is not recorded here).
+for phrase in 'This section'\''s 17 verbatim rows account for all 4 `ok` and all 5 `FAIL` results and 8 of the 21 `inconclusive` results' \
+  'the remaining 13 `inconclusive` and 3 `not-run` results of that shared run are not committed in this section'; do
+  require_in "D8 evidence shared-run counts: ${phrase}" "$native_scope" "$phrase"
+done
+for phrase in 'RESULT: FAIL (5 failed rows)' 'ok=4 failed=5 inconclusive=21 not-run=3' 'codex-cli 0.171.0' \
+  '706da87ddbbcd32da6aa050b32eb9ed76f67ece1' 'resolved from the marketplace source checkout' \
+  'byte-compared with the installed `1.38.1` cache' \
+  'all cenci hooks trusted through `/hooks`; no bypass flag' \
+  'not captured; `RESULT: FAIL` maps to exit 1 (inferred from the runner, not observed)' \
+  '#### Verbatim runner rows' \
+  '| apply (tampered artifact): digest-mismatch line printed | FAIL |' \
+  '{"gateCommand":"true"}' 'refused at guard canary preflight' 'positive path not exercised' 'CANARY_STATUS=refused' \
+  'The fixture was under `/tmp`' \
+  'the probe'\''s only candidate (`codex features list: collaboration_modes removed true`) is not a version-verified startup control' \
+  'https://github.com/matteobortolazzo/cenci/issues/1584' 'https://github.com/matteobortolazzo/cenci/issues/1585'; do
+  require_in "D8 evidence section records: ${phrase}" "$native_scope" "$phrase"
+done
+# No local path or UUID shape leaks into the evidence section, docs/codex.md or the adapter contract (the placeholders
+# <HOME>, <FIXTURE> and <UUID> are the only allowed stand-ins).
+uuid_re='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+for uuid_sample in '0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' '0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D'; do
+  [[ "$uuid_sample" =~ $uuid_re ]] || fail "D8 leak guard self-test: the UUID shape does not match the UUID ${uuid_sample}"
+done
+adapter_all="$(normalize "${ROOT}/docs/adapter-contract.md")"
+for leak_doc in 'evidence section' 'docs/codex.md' 'docs/adapter-contract.md'; do
+  case "$leak_doc" in
+    'evidence section') leak_text="$native_scope" ;;
+    'docs/codex.md') leak_text="$codex_docs_all" ;;
+    *) leak_text="$adapter_all" ;;
+  esac
+  for phrase in '/home/' '/Users/' '/root/' '/var/folders/' 'C:\Users'; do
+    forbid_in "D8 ${leak_doc} leaks no local path ${phrase}" "$leak_text" "$phrase"
+  done
+  [[ -n "$leak_text" && ! "$leak_text" =~ $uuid_re ]] || fail "D8 ${leak_doc} has no text or contains a UUID-shaped string"
+done
+# Non-vacuity of the extraction: inject `pending native run` into the Interactive subsection of a copy, behind a
+# fenced `## ` line, and prove the same extraction sees one more occurrence and still reads past the fenced heading.
+native_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cenci-native-evidence.XXXXXX")" || { echo "workflows.test.sh: mktemp failed (native evidence self-test)." >&2; exit 2; }
+awk '{ print } $0 == "### Interactive Plan-mode record" { print "```text"; print "## injected heading inside a fence"; print "```"; print "pending native run" }' "$native_evidence" > "${native_tmp}/evidence.md" \
+  || fail "D8 evidence self-test: could not write the injected copy"
+native_probe="$(awk -v h="$native_heading" "$native_awk" "${native_tmp}/evidence.md" | tr '\n' ' ' | tr -s ' ')" \
+  || { fail "D8 evidence self-test: extraction of the injected copy failed"; native_probe=""; }
+# Fail-closed proof: no matching heading, the heading twice (a section apart), and a heading never terminated by a
+# following `## ` must each make the extraction exit non-zero. `fail` is called only when one is accepted.
+printf '%s\n' '## Other section' 'text' '## Next section' > "${native_tmp}/missing.md"
+printf '%s\n' "$native_heading" 'body' '## Next section' "$native_heading" 'body' '## Last section' > "${native_tmp}/repeated.md"
+printf '%s\n' "$native_heading" 'body' '### Subsection' 'body' > "${native_tmp}/unterminated.md"
+for synthetic in missing repeated unterminated; do
+  [[ -s "${native_tmp}/${synthetic}.md" ]] || { fail "D8 evidence self-test: could not write the '${synthetic}' input"; continue; }
+  native_rc=0
+  awk -v h="$native_heading" "$native_awk" "${native_tmp}/${synthetic}.md" > /dev/null || native_rc=$?
+  [[ "$native_rc" -eq 3 ]] \
+    || fail "D8 evidence self-test: the extraction must exit 3 (fail closed) on the '${synthetic}' input, got ${native_rc}"
+done
+# The same fail-closed proof for the bullet extractor: a missing bullet and a duplicated bullet must each exit 3.
+bullet_awk='index($0, p) == 1 { if (seen) dup = 1; seen = 1; on = 1; print; next }
+  on && ($0 ~ /^- / || $0 == "" || $0 ~ /^#/) { on = 0 }
+  on { print }
+  END { exit ((seen && !dup) ? 0 : 3) }'
+printf '%s\n' '- Some other bullet' 'text' > "${native_tmp}/bullet-missing.md"
+printf '%s\n' '- Target bullet one' 'text' '- Target bullet two' > "${native_tmp}/bullet-duplicated.md"
+for synthetic in bullet-missing bullet-duplicated; do
+  [[ -s "${native_tmp}/${synthetic}.md" ]] || { fail "D8 bullet self-test: could not write the '${synthetic}' input"; continue; }
+  native_rc=0
+  awk -v p='- Target bullet' "$bullet_awk" "${native_tmp}/${synthetic}.md" > /dev/null || native_rc=$?
+  [[ "$native_rc" -eq 3 ]] \
+    || fail "D8 bullet self-test: the bullet extraction must exit 3 (fail closed) on the '${synthetic}' input, got ${native_rc}"
+done
+if [[ -n "$native_tmp" && -d "$native_tmp" ]]; then rm -rf "$native_tmp"; fi
+native_needle='pending native run'
+native_scope_hits="$(grep -oF -- "$native_needle" <<< "$native_scope" | wc -l)"
+native_probe_hits="$(grep -oF -- "$native_needle" <<< "$native_probe" | wc -l)"
+[[ -n "$native_probe" && "$native_probe_hits" -eq $(( native_scope_hits + 1 )) ]] \
+  || fail "D8 evidence self-test: the injected '${native_needle}' was not caught (section ${native_scope_hits} hits, injected copy ${native_probe_hits})"
+require_in "D8 evidence self-test: extraction is fence-aware" "$native_probe" 'injected heading inside a fence'
+# docs/codex.md cites the record only where it supports the claim, and states every FAIL, inconclusive and not-observed item.
+# The self-check and fresh-process persist bullets each carry their own native-result note (the bullet is the scope, so a
+# note moved into the other bullet or elsewhere in the file fails).
+for bullet_start in '- The Plan-mode self-check prints one line' '- `persist` in a session with no Plan-mode-approved plan'; do
+  bullet="$(awk -v p="$bullet_start" "$bullet_awk" "$codex_docs" | tr '\n' ' ' | tr -s ' ')" \
+    || { fail "D8 docs/codex.md: bullet '${bullet_start}' not found exactly once"; bullet=""; }
+  for phrase in '`FAIL`' '2 tool calls' '`nothing written` sub-row is `ok`' 'https://github.com/matteobortolazzo/cenci/issues/1584'; do
+    require_in "D8 docs/codex.md bullet '${bullet_start}' records: ${phrase}" "$bullet" "$phrase"
+  done
+done
+# The runner pointer's Plan-mode half names the recorded 0.171.0 result (the ci-repair half is #1398's and is not pinned).
+require_in "D8 docs/codex.md runner pointer records the Plan-mode result" "$codex_docs_all" \
+  "The Plan-mode, handoff and goal results, a Codex 0.171.0 run that ended \`RESULT: FAIL\`, are recorded in [\`codex-native-evidence.md\`](${goal_evidence_link})"
+for phrase in 'zero-writes row is `inconclusive`: nothing changed, but nothing shows the apply refused' \
+  'advanced past `planned` (status `needs-input`, phase `tests`)' \
+  'a new-process `apply` on a tampered artifact is `FAIL`' \
+  'the digest-mismatch line was not printed' \
+  'a successful interactive `persist` is not verified' \
+  'were not observed either' \
+  'the goal lifecycle (create, skip, complete) was not observed natively (`inconclusive`: no goal tool calls visible to `codex exec`)' \
+  'none of it is verified' 'neither message observed natively' \
+  'https://github.com/matteobortolazzo/cenci/issues/1584' 'https://github.com/matteobortolazzo/cenci/issues/1585'; do
+  require_in "D8 docs/codex.md native result note: ${phrase}" "$codex_docs_all" "$phrase"
+done
+# adapter-contract cites the record from the planning-immutability row only: the sub-rows that read `ok`, naming the scenarios' FAIL.
+planning_needle='| `planning-immutability` | Script:'
+planning_hits="$(grep -oF -- "$planning_needle" "${ROOT}/docs/adapter-contract.md" | wc -l | tr -d '[:space:]')"
+[[ "$planning_hits" -eq 1 ]] || fail "D8 adapter-contract: expected exactly one planning-immutability row, found ${planning_hits}"
+planning_row="$(grep -F -- "$planning_needle" "${ROOT}/docs/adapter-contract.md" | tr -s ' ')" \
+  || { fail "D8 adapter-contract: planning-immutability row not found"; planning_row=""; }
+# No other row of the contract cites the record: every anchor occurrence in the file sits inside that one row.
+adapter_link_hits="$(grep -oF -- "$goal_evidence_link" "${ROOT}/docs/adapter-contract.md" | wc -l | tr -d '[:space:]')"
+planning_link_hits="$(grep -oF -- "$goal_evidence_link" <<< "$planning_row" | wc -l | tr -d '[:space:]')"
+[[ "$planning_link_hits" -ge 1 && "$adapter_link_hits" -eq "$planning_link_hits" ]] \
+  || fail "D8 adapter-contract: the record is cited ${adapter_link_hits} times in the file but ${planning_link_hits} times in the planning-immutability row"
+for phrase in "$goal_evidence_link" 'nothing written' 'FAIL'; do
+  require_in "D8 adapter-contract planning-immutability row cites the record: ${phrase}" "$planning_row" "$phrase"
+done
 require_in "D8 adapter-contract baseline-gate" "$(normalize "${ROOT}/docs/adapter-contract.md")" 'goal left unchanged (`codex-runtime` Goal lifecycle stop step)'
 
 # Final review fixes: every restatement of the existing-goal rule carries the resumed-apply exception (#979).
