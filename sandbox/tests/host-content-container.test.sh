@@ -20,8 +20,10 @@ for agent in claude codex; do
         claude) instruction=CLAUDE.md; package='@anthropic-ai/claude-code@2.1.330' ;;
         codex) instruction=AGENTS.md; package='@openai/codex@0.171.0' ;;
     esac
+    # The single-quoted script expands variables inside the test container.
+    # shellcheck disable=SC2016
     "$runtime" run --rm --user node -w /tmp -e HOME=/home/node \
-        -v "$here/../lib/host-content.sh:/helper.sh:ro" \
+        -v "$here/../lib:/opt/test-lib:ro" \
         -v "$work/skill:/opt/cenci-host-content/skills/sandbox-check:ro" \
         -v "$work/personal.md:/opt/cenci-host-content/instructions/$instruction:ro" \
         node:24-bookworm bash -euo pipefail -c '
@@ -29,7 +31,7 @@ for agent in claude codex; do
             npm install --no-fund --no-audit --prefix /tmp/test-clients "$2"
             mkdir /tmp/project
             cd /tmp/project
-            bash /helper.sh "$agent" "$HOME"
+            bash /opt/test-lib/host-content.sh "$agent" "$HOME"
             case $agent in
                 claude)
                     instructions="$HOME/.claude/CLAUDE.md"

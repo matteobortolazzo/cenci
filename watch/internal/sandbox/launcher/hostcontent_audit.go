@@ -15,21 +15,27 @@ type HostContentPosture struct {
 	Warning    string         `json:"warning,omitempty"`
 }
 
-func (e *Engine) observedHostContent(name string, profile hostProfile, mounts []MountPosture) *HostContentPosture {
+func (e *Engine) observedHostContent(scope Scope, profile hostProfile, mounts []MountPosture, reuseMounts []reuseMount) *HostContentPosture {
 	actual := []MountPosture{}
 	for _, mount := range mounts {
 		if mount.Kind == MountKindHostContent {
 			actual = append(actual, mount)
 		}
 	}
+	h := &HostContentPosture{Configured: profile.Mounts, Observed: actual, Status: "recreate"}
+	if profile.Authorized {
+		if err := checkHostProfileWorkspace(scope, reuseMounts); err != nil {
+			h.Warning = err.Error()
+			return h
+		}
+	}
 	if len(profile.Mounts) == 0 && len(actual) == 0 {
 		return nil
 	}
-	h := &HostContentPosture{Configured: profile.Mounts, Observed: actual, Status: "recreate"}
 	if !sameHostContent(profile.Mounts, actual) {
 		return h
 	}
-	identity, err := e.hostContentIdentity(name)
+	identity, err := e.hostContentIdentity(scope.ContainerName)
 	if err != nil {
 		h.Status = "unverified"
 		h.Warning = fmt.Sprintf("could not verify personal content mount identity: %v", err)

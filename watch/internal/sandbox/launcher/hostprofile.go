@@ -75,6 +75,9 @@ func resolveHostProfile(agent string, scope Scope, home string) (hostProfile, er
 	if err := checkHostProfilePath(path, home, scope); err != nil {
 		return profile, err
 	}
+	if err := validatePersonalFile(path, info); err != nil {
+		return profile, err
+	}
 	if len(raw) == 0 || raw[0] != '{' {
 		return profile, fmt.Errorf("%s: sandboxHostProfiles.%s must be an object", path, agent)
 	}
@@ -119,7 +122,7 @@ func resolveHostProfile(agent string, scope Scope, home string) (hostProfile, er
 // Refuse checkout-resident or group/other-writable paths, including their
 // ancestors: a repository-selected XDG path must never become a trust root.
 func checkHostProfilePath(path, home string, scope Scope) error {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path || !addDirPathIsPlain(path) || strings.ContainsAny(path, ",\"") || path == home || !pathContains(home, path) {
+	if !filepath.IsAbs(home) || filepath.Clean(home) != home || !filepath.IsAbs(path) || filepath.Clean(path) != path || !addDirPathIsPlain(path) || strings.ContainsAny(path, ",\"") || path == home || !pathContains(home, path) {
 		return fmt.Errorf("host profile path %q must be an absolute canonical path under %q without mount delimiters", path, home)
 	}
 	real, err := filepath.EvalSymlinks(path)
@@ -143,7 +146,10 @@ func checkHostProfilePath(path, home string, scope Scope) error {
 			return err
 		}
 		st := info.Sys().(*syscall.Stat_t)
-		if int(st.Uid) != os.Getuid() && st.Uid != 0 || info.Mode().Perm()&0022 != 0 {
+		// System temp directories may contain a private home in tests or
+		// ephemeral environments. Sticky ownership protects its child name.
+		stickyAncestor := !pathContains(realHome, p) && info.Mode()&os.ModeSticky != 0
+		if int(st.Uid) != os.Getuid() && st.Uid != 0 || info.Mode().Perm()&0022 != 0 && !stickyAncestor {
 			return fmt.Errorf("host profile %q must be owned by the current user or root and writable only by its owner", p)
 		}
 		if info.IsDir() {
@@ -155,7 +161,7 @@ func checkHostProfilePath(path, home string, scope Scope) error {
 				return err
 			}
 		}
-		if p == realHome {
+		if p == filepath.Dir(p) {
 			break
 		}
 	}
@@ -207,7 +213,7 @@ func (p *hostProfile) resolveContent(agent string, scope Scope, home string) err
 		st := info.Sys().(*syscall.Stat_t)
 		// A bind follows its inode. Atomic replacement of an instruction file
 		// leaves a running mount attached to the old file despite an identical path.
-		fmt.Fprintf(hash, "%s\x00%s\x00%d:%d\n", m.Source, m.Destination, st.Dev, st.Ino)
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%d:%d\n", m.Source, m.Destination, st.Dev, st.Ino)
 	}
 	if len(mounts) > 0 {
 		p.ContentIdentity = fmt.Sprintf("%x", hash.Sum(nil))
@@ -252,7 +258,7 @@ func validateSkillDirectory(root string) error {
 				return err
 			}
 			resolved, err := filepath.EvalSymlinks(path)
-			if err != nil || filepath.IsAbs(target) || !pathContains(root, resolved) {
+			if err != nil || filepath.IsAbs(target) || !pathContains(root, filepath.Join(filepath.Dir(path), target)) || !pathContains(root, resolved) {
 				return fmt.Errorf("host skill %q: broken, absolute or escaping symlink %q", root, path)
 			}
 			// Relative links to in-tree regular files are portable inside the bind.
