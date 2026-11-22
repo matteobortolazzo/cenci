@@ -567,6 +567,10 @@ order_in "C5 apply stops on verify" "$handoff_apply" 'require-runtime.sh' 'check
 require_in "C5 apply stops on verify" "$handoff_apply" 'reports its one stderr line'
 require_in "C5 apply stops on verify" "$handoff_apply" '`resolved.planPath`'
 require_in "C5 apply stops on verify" "$handoff_apply" 'plan in Plan mode, then persist'
+# #1585: every non-zero verify stop line (exit 3 and exit 2) is printed verbatim on its own line, never paraphrased.
+for phrase in 'For every non-zero `verify`' 'is printed verbatim on its own line' 'the `checkpoint: <path>: ` prefix' 'never paraphrased, summarized or replaced' 'any explanation follows the line'; do
+  require_in "C5 apply prints the verify line verbatim" "$handoff_apply" "$phrase"
+done
 
 # C6: a resumed apply starts at nextPhase and never repeats a completed gate; first-vs-saved comes from the checkpoint phase.
 for phrase in 'never recreate a recorded worktree, re-apply a label or reopen a PR' '`nextPhase`' '`lastCompletedGate`' \
@@ -627,6 +631,11 @@ done
 # The docs literals are the helper's literals, not a paraphrase.
 for phrase in 'no checkpoint found' 'no approved plan was persisted — plan in Plan mode, then persist' 'plan artifact changed since approval (digest mismatch)'; do
   require_in "C9 docs literals match checkpoint.mjs" "$(normalize "${ROOT}/codex/checkpoint.mjs")" "$phrase"
+done
+# #1585: the docs mirror the verbatim-line rule, and the recorded 0.171.0 tamper result is marked as predating it.
+require_in "C9 docs apply prints the verify line verbatim" "$docs_handoff" '`apply` prints that stderr line verbatim, on its own line, before any explanation'
+for phrase in 'predates the procedure change in #1585' 'a new native run is needed to re-judge it'; do
+  require_in "C9 docs native note predates #1585" "$docs_handoff" "$phrase"
 done
 require_in "C9 docs literals match require-runtime.sh" "$(normalize "${ROOT}/codex/require-runtime.sh")" 'Codex workflow runtime unavailable — Node.js %s+ not found on PATH (found: %s). Install Node.js %s or newer, then rerun; no checkpoint, workflow, or GitHub state was changed.'
 # Every workflow's artifact and apply command appear in the docs table, and its companion names the same artifact.
