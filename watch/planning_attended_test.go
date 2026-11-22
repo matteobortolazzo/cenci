@@ -121,6 +121,7 @@ func TestPlanningAttendedStatus_JSONNonRepoDirOmitsRepoFields(t *testing.T) {
 }
 
 func TestPlanningAttendedStatus_JSONReportsRepoAutonomyAndCombinedVerdict(t *testing.T) {
+	useFakeGhDefaultBranch(t, "main")
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	repoDir := initGitRemote(t, "git@github.com:owner/name.git")
 

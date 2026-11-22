@@ -313,6 +313,11 @@ type State struct {
 	// `gh pr view`: additive `omitempty`, no stateSchemaVersion bump, kept by
 	// stop, re-arm and reset, gone only with the state file. Nil means no pin.
 	AutomergePin *automergePin `json:"automergePin,omitempty"`
+
+	// BranchUpdate (#1475) is the per-(head, base) record of the head-pinned,
+	// non-force branch update for a clean BEHIND PR. Additive `omitempty`, no
+	// stateSchemaVersion bump; nil means no attempt yet.
+	BranchUpdate *branchUpdate `json:"branchUpdate,omitempty"`
 }
 
 // automergePin is State.AutomergePin (#870): the sorted, de-duplicated closing
@@ -360,14 +365,17 @@ type prView struct {
 	// IsCrossRepository (#870) is a pointer so an absent field is told apart
 	// from an explicit false.
 	IsCrossRepository *bool `json:"isCrossRepository"`
+	// BaseRefOID (#1475) is the base branch's tip commit: with HeadRefOID it is the
+	// (head, base) pair the branch update is attempted once per.
+	BaseRefOID string `json:"baseRefOid"`
 }
 
 // prViewFields is the --json field set every `gh pr view` call in this
 // package requests -- shared by tick's own fetch and merge.go's post-merge
 // verification refetch so both decode the identical prView shape. It ends with
-// isCrossRepository (#870); internal/dispatch's chainPRViewFields test mirror
-// must stay byte-identical.
-const prViewFields = "number,title,state,headRefName,headRefOid,mergedAt,closingIssuesReferences,url,baseRefName,mergeable,mergeStateStatus,isDraft,changedFiles,additions,deletions,files,isCrossRepository"
+// isCrossRepository (#870) and baseRefOid (#1475); internal/dispatch's
+// chainPRViewFields test mirror must stay byte-identical.
+const prViewFields = "number,title,state,headRefName,headRefOid,mergedAt,closingIssuesReferences,url,baseRefName,mergeable,mergeStateStatus,isDraft,changedFiles,additions,deletions,files,isCrossRepository,baseRefOid"
 
 // normalizeIssues returns issues sorted ascending and de-duplicated as a new,
 // non-nil slice (an empty set marshals as [] rather than null, per
@@ -768,9 +776,10 @@ func Run(o Options) error {
 	s.PID = os.Getpid()
 	// A restarted supervisor over a CI-paused state stays needs-input until its
 	// first tick, rather than briefly reading as running (#1456). So does one
-	// over a recorded head-move hold (#1539).
+	// over a recorded head-move hold (#1539), or an unsupported or exhausted
+	// branch update (#1475), which only `cenci babysit reset` clears.
 	s.Status = "running"
-	if s.CIRepairPaused || s.HeadMoveHold != nil {
+	if s.CIRepairPaused || s.HeadMoveHold != nil || branchUpdateHeld(&s) {
 		s.Status = "needs-input"
 	}
 	s.RepoRoot = localRepoRoot()
@@ -795,8 +804,14 @@ func Run(o Options) error {
 	if err := save(path, s); err != nil {
 		return err
 	}
+	// #1475: the branch update persists its attempt through this before the call,
+	// so a supervisor that dies mid-call restarts to find the pair already tried.
+	checkpoint := func() error {
+		s.UpdatedAt = time.Now().UTC()
+		return save(path, s)
+	}
 	for {
-		terminal, delay, err := tick(&s)
+		terminal, delay, err := tickWith(&s, checkpoint)
 		s.UpdatedAt = time.Now().UTC()
 		if err != nil {
 			s.Status = "retrying"
@@ -829,7 +844,16 @@ func Run(o Options) error {
 	}
 }
 
+// tick is tickWith with no checkpoint: what every caller that does not persist
+// the state mid-tick (the tests) uses.
 func tick(s *State) (bool, time.Duration, error) {
+	return tickWith(s, nil)
+}
+
+// tickWith is one supervisor tick. checkpoint, when set, persists the state
+// before the branch update's one mutation (#1475): if it fails, no update is
+// made. Run passes a closure over save; tick passes nil.
+func tickWith(s *State, checkpoint func() error) (bool, time.Duration, error) {
 	var pr prView
 	if err := ghJSON(&pr, "pr", "view", s.PR, "--repo", s.Repo, "--json", prViewFields); err != nil {
 		s.CIStatus = ciStatusUnknown
@@ -1099,6 +1123,24 @@ func tick(s *State) (bool, time.Duration, error) {
 	if s.CIRepairPaused {
 		s.Status = "needs-input"
 	}
+	// #1475: the head-pinned, non-force update of a clean BEHIND PR. It runs after
+	// the conflict and CI repair decisions above, because conflict repair owns the
+	// branch first and a writer launched this tick (or refused for capacity) defers
+	// it; a live pane or ledger writer defers it inside. updateIssued keeps the
+	// babysit-review launch below off the tick that moved the branch.
+	launchedWriter := ""
+	if ciLaunched {
+		launchedWriter = "ci-repair"
+	}
+	updateInFlight, updateIssued, err := branchUpdateStep(s, pr, branchUpdateTick{
+		conflictHeld: conflictHeld, launched: launchedWriter, waiting: capWaiting, live: live, checkpoint: checkpoint,
+	})
+	if err != nil {
+		return false, 0, err
+	}
+	if updateInFlight {
+		actionable = true
+	}
 	// Fully paginated (#854): fetchPaged follows every page up to
 	// maxFeedbackPages, so a PR with more comments than one page no longer
 	// silently misses them; commentsComplete records whether the traversal
@@ -1312,7 +1354,7 @@ func tick(s *State) (bool, time.Duration, error) {
 	// excluded until the thread reappears or the attestation is dropped: it already
 	// holds under reasonReviewStateUnknown and a worker has nothing to act on.
 	heldKeys := slices.Concat(s.HeldUntrustedKeys, slices.Collect(maps.Keys(s.ActorHeldKeys)), slices.Collect(maps.Keys(s.ActorAttestations)))
-	if toLaunch := removeKeys(removeKeys(s.PendingKeys, s.LaunchedKeys), heldKeys); discussionComplete && !conflictHeld && !ciLaunched && !capWaiting && len(toLaunch) > 0 {
+	if toLaunch := removeKeys(removeKeys(s.PendingKeys, s.LaunchedKeys), heldKeys); discussionComplete && !conflictHeld && !ciLaunched && !capWaiting && !updateIssued && len(toLaunch) > 0 {
 		w, err := live()
 		if err != nil {
 			return false, 0, err
@@ -1378,6 +1420,12 @@ func tick(s *State) (bool, time.Duration, error) {
 	}
 	if len(s.ActorHeldKeys) > 0 {
 		leadingNotes = append(leadingNotes, actorHeldNote(s.PR, s.ActorHeldKeys))
+	}
+	// #1475: an unsupported or exhausted branch update also needs a human; it
+	// stays needs-input, in this recompute and across a restart, until
+	// `cenci babysit reset <pr>` clears the record.
+	if note := branchUpdateHoldNote(s); note != "" {
+		leadingNotes = append(leadingNotes, note)
 	}
 	needsHuman := needsHumanDiscussionKeys(s)
 	if len(needsHuman) > 0 {
@@ -2270,6 +2318,9 @@ func stoppedState(s State, repo, pr string) State {
 		HeadMoveHold:          s.HeadMoveHold,
 		// #870: dropping this would silently let a re-arm re-pin a drifted grant.
 		AutomergePin: s.AutomergePin,
+		// #1475: dropping this would let a stop and re-arm make a second update call
+		// at a (head, base) pair already tried; only `reset` clears it.
+		BranchUpdate: s.BranchUpdate,
 		// #862: like the #1539 holds, dropping these would release an actor hold.
 		ActorHeldKeys:     s.ActorHeldKeys,
 		ActorAttestations: s.ActorAttestations,

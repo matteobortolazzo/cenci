@@ -229,16 +229,24 @@ func QueryPlanningAttended(path string) (bool, error) {
 }
 
 // QueryRepoAutonomy reports dir's committed planning.autonomy verdict as read
-// at the refs/remotes/origin/main tracking ref, by name — a status surface
-// (#851/#877), exported for the status commands. Unlike the dispatch gate
-// chain (which probes at the OID confirmed against the remote's current main
-// tip, #903), it runs no fetch and no remote-tip confirmation, so the verdict
-// can lag the remote and a deleted or renamed remote main leaves it reading a
+// at the refs/remotes/origin/<default> tracking ref, by name — a status surface
+// (#851/#877), exported for the status commands. <default> is the repository
+// metadata `default_branch` of repo ("owner/name"), resolved through the same
+// seam the dispatch sync uses (#1475), so the status surface and the gate agree
+// on one default-branch identity. Unlike the dispatch gate chain (which probes
+// at the OID confirmed against the remote's current default-branch tip, #903),
+// it runs no fetch and no remote-tip confirmation, so the verdict can lag the
+// remote and a deleted or renamed remote default branch leaves it reading a
 // stale ref. It is therefore never confirmed against the remote and never
-// authorizes a pickup. Fail-closed on its own failures: a non-repo dir or
-// unresolvable ref is RepoAutonomyUnreadable, never a guess.
-func QueryRepoAutonomy(dir string) RepoAutonomy {
-	return probeRepoAutonomy(dir, remoteMainAuthRef)
+// authorizes a pickup. Fail-closed on its own failures: a failed or empty
+// metadata read, an invalid branch name, a non-repo dir or an unresolvable ref
+// is RepoAutonomyUnreadable, never a guess.
+func QueryRepoAutonomy(dir, repo string) RepoAutonomy {
+	defaultBranch, err := defaultBranchFn(repo)
+	if err != nil || invalidDefaultBranchReason(dir, defaultBranch) != "" {
+		return RepoAutonomyUnreadable
+	}
+	return probeRepoAutonomy(dir, remoteTrackingRef(defaultBranch))
 }
 
 // AutomergePolicyScope summarizes one scope's automerge policy block from a

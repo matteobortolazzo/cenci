@@ -68,8 +68,8 @@ be noise, not signal.
 |---|---|---|
 | 1 | Remote `lean` plus fleet grant and successful fetch authorizes planning; local-only `lean` does not. | `TestRunOnce_LeanRepoConfigPassesAutonomyGate` |
 | 2 | Remote revocation to interactive is honored even when local main still contains lean after the last successful pass. | `TestProbeRepoAutonomy_RemoteRevokedToInteractive_LocalMainStillLean_DeniesAtRemoteRef` |
-| 3 | Fetch failure holds planning/replanning distinctly and launches no process. | `TestRunOnce_FetchOutage_HoldsPlanningLaunchesNothing_OrdinaryPlannedStillDispatches` |
-| 4 | Ordinary eligible implementation behavior under fetch failure is explicitly tested and documented. | `TestRunOnce_FetchOutage_HoldsPlanningLaunchesNothing_OrdinaryPlannedStillDispatches` |
+| 3 | Fetch failure holds planning/replanning distinctly and launches no process. | `TestRunOnce_FetchOutage_HoldsEveryPickupInThatRepo_OtherRepoStillDispatches` |
+| 4 | Ordinary eligible implementation behavior under fetch failure is explicitly tested and documented: as of #1475 a failed fetch gates every pickup in that repo for the pass, ordinary `Planned` included, with its own retryable reason, while other repos still dispatch. | `TestDecideMainSyncGate_DefaultBranchStatesGateEveryPickupType` |
 | 5 | Local-ahead main cannot supply the autonomy grant; remote config remains authoritative. | `TestProbeRepoAutonomy_LocalAheadUnpushedLean_CannotGrant_RemoteRefDenies` |
 | 6 | Dry-run and real pass use the same fetched object and produce the same authorization/staleness decision. | `TestProbeRepoAutonomies_DryRunAndRealPassAgreeUsingSameFreshRef` |
 | 7 | Mixed-fleet tests cover remote/local combinations, fetch outage, forced stale refs, malformed config, branch changes, and timeout. | `TestRunOnce_MixedFleet_RemoteLocalCombinationsAndFailureModes` |

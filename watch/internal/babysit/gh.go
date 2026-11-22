@@ -3,6 +3,7 @@ package babysit
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -111,6 +112,29 @@ func classifyGhFailure(err error) string {
 	default:
 		return failureClassCommand
 	}
+}
+
+// graphQLError is one entry of a GraphQL response's errors[]. Type is GitHub's
+// machine-readable class (FORBIDDEN, UNPROCESSABLE, ...); Message is for people.
+type graphQLError struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+// decodeGraphQLErrors reads the errors[] of a `gh api graphql` response body. On
+// a GraphQL error `gh` exits nonzero but still writes the response body to
+// stdout (execGh returns it beside the error), which is where the types are: a
+// caller classifies a failed call by them, never by the exit status alone. A body
+// that is empty, is not JSON or has no errors[] array yields nil, so a caller
+// that finds no type falls back to the generic failure, never to a guess.
+func decodeGraphQLErrors(stdout string) []graphQLError {
+	var body struct {
+		Errors []graphQLError `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &body); err != nil {
+		return nil
+	}
+	return body.Errors
 }
 
 // boundedWriter is an io.Writer that caps how many bytes it will actually

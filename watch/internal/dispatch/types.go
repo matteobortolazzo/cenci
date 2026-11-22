@@ -38,8 +38,10 @@ const (
 	StageProbeError StageProbe = "error"
 )
 
-// MainSync classifies the once-per-pass local `main` sync (#822) that runs at
-// the top of RunOnce for every enrolled repo, into a closed set, rather than
+// MainSync classifies the once-per-pass local default-branch sync (#822,
+// generalized from the literal `main` to the remote-metadata default branch by
+// #1475; the type keeps its name) that runs at the top of RunOnce for every
+// enrolled repo, into a closed set, rather than
 // collapsing distinct failure classes (watch/docs/go-gotchas.md #598,
 // watch/docs/error-handling.md #628). MainSyncSkipped is the zero value ("")
 // so every existing Ticket construction site (reconcile paths, tests) keeps
@@ -65,11 +67,11 @@ const (
 	// MainSyncMissing (#851), which is a configured, non-empty Dir that does
 	// not exist on disk.
 	MainSyncSkipped MainSync = ""
-	// MainSyncSynced means `main` is now caught up with (or was already at
-	// or ahead of) origin/main -- includes both an actual fast-forward and
+	// MainSyncSynced means the default branch is now caught up with (or was already at
+	// or ahead of) refs/remotes/origin/<default> -- includes both an actual fast-forward and
 	// the "Already up to date" no-op case (local ahead is not divergence).
 	MainSyncSynced MainSync = "synced"
-	// MainSyncDiverged means local `main` and origin/main have both moved:
+	// MainSyncDiverged means the local default branch and origin/<default> have both moved:
 	// `git merge-base --is-ancestor` proves neither is an ancestor of the
 	// other. Deterministic -- gates every ticket in the repo.
 	MainSyncDiverged MainSync = "diverged"
@@ -79,8 +81,12 @@ const (
 	// repo, distinct from MainSyncDiverged (#822 Q1).
 	MainSyncFailed MainSync = "failed"
 	// MainSyncFetchFailed means `git fetch origin` itself failed (network,
-	// auth, unresolvable remote). Transient -- ungated, self-heals next
-	// pass.
+	// auth, unresolvable remote), or succeeded but left no
+	// refs/remotes/origin/<default> (the remote lacks its own default branch).
+	// Transient, so it self-heals on a later pass, but since #1475 it gates
+	// every pickup in the repo for the pass: no fetch means no remote-confirmed
+	// default branch to trust the freshness or policy reads against (it was
+	// ungated through #822/#851).
 	MainSyncFetchFailed MainSync = "fetch_failed"
 	// MainSyncNotMain means the repo is checked out on a branch other than
 	// `main` (#851, previously the ungated MainSyncSkipped). A non-main
@@ -98,6 +104,22 @@ const (
 	// from the ungated MainSyncSkipped zero value reserved for dir == "" (no
 	// Dir configured). Gates every pickup in the repo.
 	MainSyncMissing MainSync = "missing"
+	// MainSyncNotDefault (#1475) means the repo's remote default branch is not
+	// `main` and the checkout is on some other branch (a repo whose default is
+	// `main` keeps reporting MainSyncNotMain). The detail names both the
+	// checked-out branch and the default branch. Gates every pickup in the repo.
+	MainSyncNotDefault MainSync = "not_default"
+	// MainSyncDirty (#1475) means the fast-forward failed because tracked or
+	// untracked local changes overlap the files it would rewrite. The detail
+	// carries a bounded `git status --porcelain` listing; nothing is stashed,
+	// reset or discarded. Any other failed fast-forward stays MainSyncFailed.
+	// Gates every pickup in the repo.
+	MainSyncDirty MainSync = "dirty"
+	// MainSyncDefaultBranchUnreadable (#1475) means the repository metadata
+	// `default_branch` could not be read, or came back empty or not a valid
+	// branch name. No fetch-based authorization is attempted. Gates every
+	// pickup in the repo.
+	MainSyncDefaultBranchUnreadable MainSync = "default_branch_unreadable"
 )
 
 // String renders m for logging (#822 review nitpick fix #6). MainSyncSkipped
@@ -362,7 +384,7 @@ type PlanningTrustProbe struct {
 
 // RepoAutonomy classifies the resolved per-repository `planning.autonomy`
 // authorization (#851), read from the enrolled repo's committed
-// `.cenci/config.json` after main sync, into a closed set, rather than
+// `.cenci/config.json` after the default-branch sync, into a closed set, rather than
 // collapsing distinct failure classes (watch/docs/go-gotchas.md #598,
 // watch/docs/error-handling.md #628). Like DependencyState/AnswerProbe
 // above, there is deliberately NO permissive zero-value constant here:
@@ -400,10 +422,12 @@ const (
 	// RepoAutonomyFetchUnconfirmed means probeRepoAutonomies (#877) never ran
 	// the probe at all this pass, because the repo's mainSyncResult carried no
 	// confirmed AutonomyRef -- either `git fetch origin` itself failed this
-	// pass (MainSyncFetchFailed), the fetch succeeded but the remote main tip
-	// could not be confirmed (#903: a deleted or renamed remote main, a stale
-	// refs/remotes/origin/main, an ls-remote failure or a concurrent push --
-	// the reason is mainSyncResult.AutonomyDetail), or the repo had no entry
+	// pass (MainSyncFetchFailed, or MainSyncDefaultBranchUnreadable when the
+	// default branch itself could not be named), the fetch succeeded but the
+	// remote default-branch tip could not be confirmed (#903/#1475: a deleted
+	// or renamed remote default branch, a stale
+	// refs/remotes/origin/<default>, an ls-remote failure or a concurrent push
+	// -- the reason is mainSyncResult.AutonomyDetail), or the repo had no entry
 	// at all in the syncs map. Distinct from RepoAutonomyUnreadable (the probe ran and the
 	// git command itself failed) and from RepoAutonomyMissing (the probe ran
 	// against a resolvable ref/dir but found no committed config, or dir ==
@@ -748,7 +772,7 @@ type Ticket struct {
 	// applies.
 	Branch string
 
-	// MainSync classifies the once-per-pass local `main` sync outcome for
+	// MainSync classifies the once-per-pass local default-branch sync outcome for
 	// this ticket's repo (collector-filled, #822; mirrors StageProbe above).
 	// Stays MainSyncSkipped (the zero value) when no sync map was supplied
 	// to CollectTickets (the reconciler's path) or the repo's sync was

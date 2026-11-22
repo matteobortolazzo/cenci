@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -625,5 +626,106 @@ func TestProbeRepoAutonomies_FetchUnconfirmedLogAlwaysCarriesAReason(t *testing.
 				t.Errorf("log = %q must avoid the lazyboards-reserved substrings", buf.String())
 			}
 		})
+	}
+}
+
+// -- #1475: autonomy reads on a non-main default branch ---------------------
+
+// autonomyAfterSync runs one real sync for a repo whose default branch is
+// branch, then the autonomy probe over its result, exactly as RunOnce wires
+// them, and returns both.
+func autonomyAfterSync(t *testing.T, local, branch string) (RepoAutonomy, mainSyncResult) {
+	t.Helper()
+	fixedDefaultBranch(t, branch)
+	repos := []RepoConfig{{Repo: "o/r", Dir: local}}
+	syncs := syncMains(repos, io.Discard, false)
+	return probeRepoAutonomies(repos, syncs, io.Discard)["o/r"], syncs["o/r"]
+}
+
+// TestProbeRepoAutonomy_NonMainDefault_ReadsTheRemoteConfirmedObject covers AC 2
+// and AC 3 on master and trunk defaults. The remote grants lean and a local
+// branch literally named origin/<default> carries an interactive config (and the
+// reverse): the verdict is the remote-confirmed object's, never the shadow's.
+func TestProbeRepoAutonomy_NonMainDefault_ReadsTheRemoteConfirmedObject(t *testing.T) {
+	cases := []struct {
+		name, remoteConfig, shadowConfig string
+		want                             RepoAutonomy
+	}{
+		{"remote lean, shadow interactive", leanConfigJSON, interactiveConfigJSON, RepoAutonomyLean},
+		{"remote interactive, shadow lean", interactiveConfigJSON, leanConfigJSON, RepoAutonomyInteractive},
+	}
+	for _, branch := range []string{"master", "trunk"} {
+		for _, c := range cases {
+			t.Run(branch+"/"+c.name, func(t *testing.T) {
+				mainSyncGitEnv(t)
+				local, bare := initBareOriginAndLocalOn(t, branch)
+				pushFileOn(t, bare, branch, ".cenci/config.json", c.remoteConfig)
+				gitTest(t, local, "fetch", "origin")
+				gitTest(t, local, "checkout", "-b", "shadow-tmp")
+				writeCommittedConfig(t, local, c.shadowConfig)
+				gitTest(t, local, "branch", "origin/"+branch, "shadow-tmp")
+				gitTest(t, local, "checkout", branch)
+				gitTest(t, local, "branch", "-D", "shadow-tmp")
+
+				got, sync := autonomyAfterSync(t, local, branch)
+
+				if sync.Status != MainSyncSynced {
+					t.Fatalf("sync = %q (%q), want synced", sync.Status, sync.Detail)
+				}
+				if got != c.want {
+					t.Errorf("autonomy = %q, want %q (the remote-confirmed object, not the shadow branch)", got, c.want)
+				}
+			})
+		}
+	}
+}
+
+// TestProbeRepoAutonomy_NonMainDefault_UnpushedLocalGrantDoesNotAuthorize
+// covers AC 3 on a trunk default: a lean config committed only on the local
+// default checkout (never pushed) leaves the repo not authorized -- the sync
+// reports local ahead, and the policy read still uses the remote object.
+func TestProbeRepoAutonomy_NonMainDefault_UnpushedLocalGrantDoesNotAuthorize(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocalOn(t, "trunk")
+	pushFileOn(t, bare, "trunk", ".cenci/config.json", interactiveConfigJSON)
+	gitTest(t, local, "pull", "--ff-only", "origin", "trunk")
+	writeCommittedConfig(t, local, leanConfigJSON)
+	if got := probeRepoAutonomy(local, "HEAD"); got != RepoAutonomyLean {
+		t.Fatalf("setup: local HEAD reads %q, want the unpushed lean grant", got)
+	}
+
+	got, sync := autonomyAfterSync(t, local, "trunk")
+
+	if sync.Status != MainSyncSynced {
+		t.Fatalf("sync = %q (%q), want synced (local ahead)", sync.Status, sync.Detail)
+	}
+	if got == RepoAutonomyLean {
+		t.Fatalf("autonomy = lean: an unpushed local grant authorized the repo")
+	}
+	if got != RepoAutonomyInteractive {
+		t.Errorf("autonomy = %q, want %q (the remote's committed config)", got, RepoAutonomyInteractive)
+	}
+}
+
+// TestProbeRepoAutonomy_DefaultBranchUnreadable_NeverAuthorizesFromLocalHEAD
+// covers AC 7: with the metadata read failing, a lean config on local HEAD (and
+// on a remote main) authorizes nothing; the probe reports fetch_unconfirmed
+// naming the sync status.
+func TestProbeRepoAutonomy_DefaultBranchUnreadable_NeverAuthorizesFromLocalHEAD(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, _ := initBareOriginAndLocalOn(t, "main")
+	writeCommittedConfig(t, local, leanConfigJSON)
+	stubDefaultBranch(t, func(string) (string, error) { return "", fmt.Errorf("gh api failed") })
+	repos := []RepoConfig{{Repo: "o/r", Dir: local}}
+	syncs := syncMains(repos, io.Discard, false)
+
+	var buf bytes.Buffer
+	got := probeRepoAutonomies(repos, syncs, &buf)
+
+	if got["o/r"] != RepoAutonomyFetchUnconfirmed {
+		t.Errorf("autonomy = %q, want %q", got["o/r"], RepoAutonomyFetchUnconfirmed)
+	}
+	if !strings.Contains(buf.String(), "main sync default_branch_unreadable") {
+		t.Errorf("log = %q, want the one-line reason naming the unreadable default branch", buf.String())
 	}
 }

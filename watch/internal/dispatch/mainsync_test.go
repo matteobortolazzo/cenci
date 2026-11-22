@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -66,34 +67,20 @@ func initOriginAndLocal(t *testing.T) (local, origin string) {
 // keeps the non-bare helper.
 func initBareOriginAndLocal(t *testing.T) (local, bare string) {
 	t.Helper()
-	bare = t.TempDir()
-	gitTest(t, bare, "init", "--bare", "-b", "main")
-
-	seed := t.TempDir()
-	gitTest(t, seed, "init", "-b", "main")
-	commitFile(t, seed, "base.txt", "base")
-	gitTest(t, seed, "remote", "add", "origin", bare)
-	gitTest(t, seed, "push", "origin", "main")
-
-	local = filepath.Join(t.TempDir(), "local")
-	gitTestNoDir(t, "clone", bare, local)
-	return local, bare
+	return initBareOriginAndLocalOn(t, "main")
 }
 
 // pushCommit advances a bare origin's main by one commit, made through a
 // scratch clone (a bare repo has no working tree to commit in).
 func pushCommit(t *testing.T, bare, name, content string) {
 	t.Helper()
-	scratch := filepath.Join(t.TempDir(), "scratch")
-	gitTestNoDir(t, "clone", bare, scratch)
-	commitFile(t, scratch, name, content)
-	gitTest(t, scratch, "push", "origin", "main")
+	pushFileOn(t, bare, "main", name, content)
 }
 
 // bareMainOID is the object ID the bare origin's main currently points at.
 func bareMainOID(t *testing.T, bare string) string {
 	t.Helper()
-	return gitTest(t, bare, "rev-parse", "refs/heads/main")
+	return bareBranchOID(t, bare, "main")
 }
 
 // installGitShim writes a `git` shim to a temp dir and puts it first on PATH.
@@ -124,7 +111,7 @@ func TestSyncMain_BehindOrigin_FastForwardsAndReportsSynced(t *testing.T) {
 	commitFile(t, origin, "advance.txt", "advance")
 	originHEAD := gitTest(t, origin, "rev-parse", "HEAD")
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status != MainSyncSynced {
 		t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 	}
@@ -145,7 +132,7 @@ func TestSyncMain_EqualToOrigin_ReportsSynced(t *testing.T) {
 	mainSyncGitEnv(t)
 	local, _ := initOriginAndLocal(t)
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status != MainSyncSynced {
 		t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 	}
@@ -160,7 +147,7 @@ func TestSyncMain_LocalAheadOfOrigin_ReportsSyncedHeadUnchanged(t *testing.T) {
 	commitFile(t, local, "ahead.txt", "local ahead")
 	beforeHEAD := gitTest(t, local, "rev-parse", "HEAD")
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status != MainSyncSynced {
 		t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 	}
@@ -184,7 +171,7 @@ func TestSyncMain_BothSidesMoved_ReportsDivergedHeadUnchanged(t *testing.T) {
 	commitFile(t, origin, "origin-only.txt", "origin change")
 	beforeHEAD := gitTest(t, local, "rev-parse", "HEAD")
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status != MainSyncDiverged {
 		t.Fatalf("status = %q, want MainSyncDiverged", result.Status)
 	}
@@ -205,7 +192,7 @@ func TestSyncMain_OriginUnresolvable_ReportsFetchFailedDistinctFromDivergedAndFa
 	commitFile(t, local, "base.txt", "base")
 	gitTest(t, local, "remote", "add", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status != MainSyncFetchFailed {
 		t.Fatalf("status = %q, want MainSyncFetchFailed", result.Status)
 	}
@@ -214,12 +201,13 @@ func TestSyncMain_OriginUnresolvable_ReportsFetchFailedDistinctFromDivergedAndFa
 	}
 }
 
-// TestSyncMain_DirtyTrackedFileBlocksFastForward_ReportsFailedNotDivergedOrSynced
-// covers plan test 6 (Q1): a local repo strictly behind origin (not
-// diverged), but with an uncommitted change to a file the fast-forward would
-// overwrite, must report MainSyncFailed -- not Diverged (ancestry says it
-// isn't) and not Synced (the merge itself failed).
-func TestSyncMain_DirtyTrackedFileBlocksFastForward_ReportsFailedNotDivergedOrSynced(t *testing.T) {
+// TestSyncMain_DirtyTrackedFileBlocksFastForward_ReportsDirtyNotDivergedOrSynced
+// covers plan test 6 (Q1), updated by #1475: a local repo strictly behind
+// origin (not diverged), but with an uncommitted change to a file the
+// fast-forward would overwrite, reports MainSyncDirty -- not Diverged
+// (ancestry says it isn't), not Synced (the merge itself failed) and no longer
+// the catch-all Failed. The edit survives byte-for-byte.
+func TestSyncMain_DirtyTrackedFileBlocksFastForward_ReportsDirtyNotDivergedOrSynced(t *testing.T) {
 	mainSyncGitEnv(t)
 	local, origin := initOriginAndLocal(t)
 	commitFile(t, origin, "base.txt", "changed-upstream")
@@ -227,12 +215,12 @@ func TestSyncMain_DirtyTrackedFileBlocksFastForward_ReportsFailedNotDivergedOrSy
 		t.Fatal(err)
 	}
 
-	result := syncMain(local, false)
-	if result.Status != MainSyncFailed {
-		t.Fatalf("status = %q, want MainSyncFailed", result.Status)
+	result := syncMain(local, "main", false)
+	if result.Status != MainSyncDirty {
+		t.Fatalf("status = %q, want MainSyncDirty", result.Status)
 	}
-	if result.Status == MainSyncDiverged || result.Status == MainSyncSynced {
-		t.Fatalf("a dirty-tree-blocked fast-forward must not collapse into Diverged or Synced, got %q", result.Status)
+	if got := readFile(t, filepath.Join(local, "base.txt")); got != "dirty-local-uncommitted" {
+		t.Errorf("base.txt = %q, want the local edit kept byte-for-byte", got)
 	}
 }
 
@@ -244,7 +232,7 @@ func TestSyncMain_NonRepoDir_ReportsFailed(t *testing.T) {
 	mainSyncGitEnv(t)
 	dir := t.TempDir()
 
-	result := syncMain(dir, false)
+	result := syncMain(dir, "main", false)
 	if result.Status != MainSyncFailed {
 		t.Fatalf("status = %q, want MainSyncFailed", result.Status)
 	}
@@ -261,7 +249,7 @@ func TestSyncMain_ConfiguredDirAbsentFromDisk_ReportsMissing(t *testing.T) {
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "does-not-exist-on-disk")
 
-	result := syncMain(dir, false)
+	result := syncMain(dir, "main", false)
 	if result.Status != MainSyncMissing {
 		t.Fatalf("status = %q, want MainSyncMissing", result.Status)
 	}
@@ -284,7 +272,7 @@ func TestSyncMain_FeatureBranchCheckedOut_ReportsNotMainWithoutTouchingMainOrFea
 	mainRefBefore := gitTest(t, local, "rev-parse", "main")
 	commitFile(t, origin, "advance.txt", "advance")
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status != MainSyncNotMain {
 		t.Fatalf("status = %q, want MainSyncNotMain", result.Status)
 	}
@@ -308,7 +296,7 @@ func TestSyncMain_DetachedHEAD_ReportsDetachedNotFailed(t *testing.T) {
 	sha := gitTest(t, local, "rev-parse", "HEAD")
 	gitTest(t, local, "checkout", "--detach", sha)
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status != MainSyncDetached {
 		t.Fatalf("status = %q, want MainSyncDetached (detached HEAD, not Failed or NotMain)", result.Status)
 	}
@@ -342,7 +330,7 @@ func TestSyncMain_EmptyDir_NeverProbesCwd(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(origWd) })
 
-	result := syncMain("", false)
+	result := syncMain("", "main", false)
 	if result.Status != MainSyncSkipped {
 		t.Fatalf("status = %q, want MainSyncSkipped -- dir=\"\" must never probe/sync", result.Status)
 	}
@@ -367,12 +355,12 @@ func TestSyncMain_DryRun_ReportsSyncedWithoutMutatingHead(t *testing.T) {
 	commitFile(t, origin, "advance.txt", "advance")
 	beforeHEAD := gitTest(t, local, "rev-parse", "HEAD")
 
-	result := syncMain(local, true)
+	result := syncMain(local, "main", true)
 	if result.Status != MainSyncSynced {
 		t.Fatalf("status = %q, want MainSyncSynced (classified, not merged)", result.Status)
 	}
-	if result.FreshRef != "origin/main" {
-		t.Errorf("FreshRef = %q, want %q (dry-run strictly-behind must read the fetched blob, not local HEAD)", result.FreshRef, "origin/main")
+	if result.FreshRef != "refs/remotes/origin/main" {
+		t.Errorf("FreshRef = %q, want %q (dry-run strictly-behind must read the fetched blob, not local HEAD)", result.FreshRef, "refs/remotes/origin/main")
 	}
 	if got := gitTest(t, local, "rev-parse", "HEAD"); got != beforeHEAD {
 		t.Errorf("local HEAD = %s, want unchanged %s -- dry-run must never merge", got, beforeHEAD)
@@ -484,7 +472,7 @@ exec "%s" "$@"
 	}
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status != MainSyncFailed {
 		t.Fatalf("status = %q, detail = %q, want MainSyncFailed", result.Status, result.Detail)
 	}
@@ -615,7 +603,7 @@ exec "%s" "$@"
 	}
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status != MainSyncNotMain {
 		t.Fatalf("status = %q, detail = %q, want MainSyncNotMain", result.Status, result.Detail)
 	}
@@ -667,7 +655,7 @@ exec "%[1]s" "$@"
 	}
 	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status != MainSyncFailed {
 		t.Fatalf("status = %q, detail = %q, want MainSyncFailed", result.Status, result.Detail)
 	}
@@ -810,11 +798,20 @@ func TestRunOnce_SyncsMainOncePerPassIndependentOfTicketCount(t *testing.T) {
 // it is empty whenever the remote tip cannot be confirmed -- a deleted or
 // renamed remote main, a non-standard remote.origin.fetch, a concurrent push.
 
-// TestRemoteMainAuthRef_IsFullyQualified pins the authorization ref
-// constant's literal value.
-func TestRemoteMainAuthRef_IsFullyQualified(t *testing.T) {
-	if remoteMainAuthRef != "refs/remotes/origin/main" {
-		t.Fatalf("remoteMainAuthRef = %q, want %q", remoteMainAuthRef, "refs/remotes/origin/main")
+// remoteMainAuthRef is the fully qualified tracking ref of a `main` default,
+// spelled out for the tests that read it by name.
+const remoteMainAuthRef = "refs/remotes/origin/main"
+
+// TestRemoteTrackingRef_IsFullyQualified pins the authorization ref builder's
+// literal output for main and a non-main default.
+func TestRemoteTrackingRef_IsFullyQualified(t *testing.T) {
+	for branch, want := range map[string]string{"main": remoteMainAuthRef, "trunk": "refs/remotes/origin/trunk"} {
+		if got := remoteTrackingRef(branch); got != want {
+			t.Fatalf("remoteTrackingRef(%q) = %q, want %q", branch, got, want)
+		}
+	}
+	if got, want := remoteHeadRef("trunk"), "refs/heads/trunk"; got != want {
+		t.Fatalf("remoteHeadRef(trunk) = %q, want %q", got, want)
 	}
 }
 
@@ -849,7 +846,7 @@ func TestSyncMain_AutonomyRef_Table(t *testing.T) {
 		local, bare := initBareOriginAndLocal(t)
 		pushCommit(t, bare, "advance.txt", "advance")
 
-		result := syncMain(local, false)
+		result := syncMain(local, "main", false)
 		if result.Status != MainSyncSynced {
 			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 		}
@@ -861,7 +858,7 @@ func TestSyncMain_AutonomyRef_Table(t *testing.T) {
 		local, bare := initBareOriginAndLocal(t)
 		pushCommit(t, bare, "advance.txt", "advance")
 
-		result := syncMain(local, true)
+		result := syncMain(local, "main", true)
 		if result.Status != MainSyncSynced {
 			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 		}
@@ -872,7 +869,7 @@ func TestSyncMain_AutonomyRef_Table(t *testing.T) {
 		mainSyncGitEnv(t)
 		local, bare := initBareOriginAndLocal(t)
 
-		result := syncMain(local, false)
+		result := syncMain(local, "main", false)
 		if result.Status != MainSyncSynced {
 			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 		}
@@ -884,7 +881,7 @@ func TestSyncMain_AutonomyRef_Table(t *testing.T) {
 		local, bare := initBareOriginAndLocal(t)
 		commitFile(t, local, "ahead.txt", "local ahead")
 
-		result := syncMain(local, false)
+		result := syncMain(local, "main", false)
 		if result.Status != MainSyncSynced {
 			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 		}
@@ -900,7 +897,7 @@ func TestSyncMain_AutonomyRef_Table(t *testing.T) {
 		commitFile(t, local, "local-only.txt", "local change")
 		pushCommit(t, bare, "origin-only.txt", "origin change")
 
-		result := syncMain(local, false)
+		result := syncMain(local, "main", false)
 		if result.Status != MainSyncDiverged {
 			t.Fatalf("status = %q, want MainSyncDiverged", result.Status)
 		}
@@ -914,7 +911,7 @@ func TestSyncMain_AutonomyRef_Table(t *testing.T) {
 		commitFile(t, local, "base.txt", "base")
 		gitTest(t, local, "remote", "add", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
 
-		result := syncMain(local, false)
+		result := syncMain(local, "main", false)
 		if result.Status != MainSyncFetchFailed {
 			t.Fatalf("status = %q, want MainSyncFetchFailed", result.Status)
 		}
@@ -956,7 +953,7 @@ exec "%s" "$@"
 		}
 		t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-		result := syncMain(local, false)
+		result := syncMain(local, "main", false)
 		if result.Status != MainSyncNotMain {
 			t.Fatalf("status = %q, want MainSyncNotMain", result.Status)
 		}
@@ -977,7 +974,7 @@ exec "%s" "$@"
   if [ "$arg" = "merge" ]; then echo "simulated merge failure" >&2; exit 1; fi
 done`)
 
-		result := syncMain(local, false)
+		result := syncMain(local, "main", false)
 		if result.Status != MainSyncFailed {
 			t.Fatalf("status = %q, detail = %q, want MainSyncFailed", result.Status, result.Detail)
 		}
@@ -1018,7 +1015,7 @@ exec "%s" "$@"
 		t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 		start := time.Now()
-		result := syncMain(local, false)
+		result := syncMain(local, "main", false)
 		elapsed := time.Since(start)
 
 		if result.Status != MainSyncFetchFailed {
@@ -1056,7 +1053,7 @@ func TestSyncMain_FetchFailed_NeverRunsLsRemote(t *testing.T) {
 	invocations := filepath.Join(t.TempDir(), "invocations.log")
 	installGitShim(t, fmt.Sprintf(`printf '%%s\n' "$*" >> %q`, invocations))
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status != MainSyncFetchFailed {
 		t.Fatalf("status = %q, want MainSyncFetchFailed", result.Status)
 	}
@@ -1086,7 +1083,7 @@ func TestSyncMain_RemoteMainDeleted_AutonomyUnconfirmedWhileTrackingRefStaysStal
 	staleOID := gitTest(t, local, "rev-parse", remoteMainAuthRef)
 	gitTest(t, bare, "update-ref", "-d", "refs/heads/main")
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status == MainSyncFetchFailed {
 		t.Fatalf("status = MainSyncFetchFailed (%q): the fetch must succeed against an origin with no main, otherwise the ls-remote path never ran", result.Detail)
 	}
@@ -1114,7 +1111,7 @@ func TestSyncMain_NonStandardFetchRefspec_StaleTrackingRefIsUnconfirmed(t *testi
 	gitTest(t, local, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/mirror-main")
 	pushCommit(t, bare, "advance.txt", "advance")
 
-	result := syncMain(local, false)
+	result := syncMain(local, "main", false)
 	if result.Status == MainSyncFetchFailed {
 		t.Fatalf("status = MainSyncFetchFailed (%q), want the fetch to succeed", result.Detail)
 	}
@@ -1141,8 +1138,8 @@ func TestSyncMain_LsRemoteFailsAfterFetch_OnlyAutonomyIsUnconfirmed(t *testing.T
 		wantDetail string
 		wantFresh  string
 	}{
-		{"real pass", false, "fast-forwarded to origin/main", "HEAD"},
-		{"dry run", true, "would fast-forward origin/main (dry-run, not merged)", "origin/main"},
+		{"real pass", false, "fast-forwarded to refs/remotes/origin/main", "HEAD"},
+		{"dry run", true, "would fast-forward origin/main (dry-run, not merged)", "refs/remotes/origin/main"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1156,7 +1153,7 @@ func TestSyncMain_LsRemoteFailsAfterFetch_OnlyAutonomyIsUnconfirmed(t *testing.T
   fi
 done`)
 
-			result := syncMain(local, tc.dryRun)
+			result := syncMain(local, "main", tc.dryRun)
 			if result.Status != MainSyncSynced || result.Detail != tc.wantDetail || result.FreshRef != tc.wantFresh {
 				t.Errorf("status/detail/freshRef = %q/%q/%q, want %q/%q/%q (unchanged by the ls-remote failure)",
 					result.Status, result.Detail, result.FreshRef, MainSyncSynced, tc.wantDetail, tc.wantFresh)
@@ -1199,7 +1196,7 @@ if [ "$is_fetch" = "1" ] && [ ! -e %[1]q ]; then
   exit $status
 fi`, marker, scratch))
 
-	first := syncMain(local, false)
+	first := syncMain(local, "main", false)
 	if got := bareMainOID(t, bare); got == oldTip {
 		t.Fatal("test setup: the racing push never happened")
 	}
@@ -1210,7 +1207,7 @@ fi`, marker, scratch))
 		t.Errorf("first pass AutonomyDetail = %q, want a tracking-ref/remote-tip mismatch reason", first.AutonomyDetail)
 	}
 
-	second := syncMain(local, false)
+	second := syncMain(local, "main", false)
 	assertConfirmedOID(t, second, bare)
 }
 
@@ -1227,15 +1224,18 @@ func TestSyncMain_TrackingRefAbsentButMainSlashXExists_IsNotMatched(t *testing.T
 	gitTest(t, local, "update-ref", "-d", remoteMainAuthRef)
 	gitTest(t, local, "update-ref", remoteMainAuthRef+"/x", oid)
 
-	result := syncMain(local, false)
-	if result.Status == MainSyncFetchFailed {
-		t.Fatalf("status = MainSyncFetchFailed (%q), want the fetch to succeed", result.Detail)
+	result := syncMain(local, "main", false)
+	// #1475: a successful fetch that leaves no exact refs/remotes/origin/main
+	// (only main/x exists, which must not match) is fetch_failed, with the
+	// absent reason in its detail -- never a prefix match on main/x.
+	if result.Status != MainSyncFetchFailed {
+		t.Fatalf("status = %q (%q), want MainSyncFetchFailed: the exact tracking ref is absent", result.Status, result.Detail)
 	}
 	if result.AutonomyRef != "" {
 		t.Errorf("AutonomyRef = %q, want empty: only refs/remotes/origin/main/x exists, which must not match", result.AutonomyRef)
 	}
-	if !strings.Contains(result.AutonomyDetail, "absent") {
-		t.Errorf("AutonomyDetail = %q, want the tracking-ref-absent reason (not a prefix match on main/x)", result.AutonomyDetail)
+	if !strings.Contains(result.Detail, "absent") {
+		t.Errorf("Detail = %q, want the tracking-ref-absent reason (not a prefix match on main/x)", result.Detail)
 	}
 }
 
@@ -1287,7 +1287,7 @@ func TestSyncMain_ConfirmationParsesStdoutSeparatelyFromStderr(t *testing.T) {
   fi
 done`, call.verb, call.noise))
 
-				result := syncMain(local, dryRun)
+				result := syncMain(local, "main", dryRun)
 				if result.Status != MainSyncSynced {
 					t.Fatalf("status = %q (%q), want MainSyncSynced", result.Status, result.Detail)
 				}
@@ -1373,19 +1373,29 @@ func TestParseLsRemoteMainOID_Table(t *testing.T) {
 		{"short oid", "abc123\trefs/heads/main", "", false},
 		{"41 hex chars", testOID40 + "0\trefs/heads/main", "", false},
 		{"non-hex chars", strings.Repeat("g", 40) + "\trefs/heads/main", "", false},
+		{"a trunk default is not main", testOID40 + "\trefs/heads/trunk", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := parseLsRemoteMainOID(tc.out)
+			got, ok := parseLsRemoteOID(tc.out, remoteHeadRef("main"))
 			if ok != tc.wantOK || got != tc.want {
-				t.Errorf("parseLsRemoteMainOID(%q) = (%q, %v), want (%q, %v)", tc.out, got, ok, tc.want, tc.wantOK)
+				t.Errorf("parseLsRemoteOID(%q, main) = (%q, %v), want (%q, %v)", tc.out, got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}
+
+	// The same parser, asked about a non-main default, accepts only that
+	// branch's exact refname (#1475).
+	if got, ok := parseLsRemoteOID(testOID40+"\trefs/heads/trunk", remoteHeadRef("trunk")); !ok || got != testOID40 {
+		t.Errorf("parseLsRemoteOID(trunk line, trunk) = (%q, %v), want (%q, true)", got, ok, testOID40)
+	}
+	if got, ok := parseLsRemoteOID(testOID40+"\trefs/heads/main", remoteHeadRef("trunk")); ok {
+		t.Errorf("parseLsRemoteOID(main line, trunk) = (%q, true), want no confirmation", got)
+	}
 }
 
-// TestParseTrackingRefOID_Table: exactly one line whose refname equals
-// remoteMainAuthRef counts; every other line (refs/remotes/origin/main/x,
+// TestParseTrackingRefOID_Table: exactly one line whose refname equals the
+// asked tracking ref counts; every other line (refs/remotes/origin/main/x,
 // which a prefix match returns) is ignored; the OID must be 40 or 64
 // lowercase hex.
 func TestParseTrackingRefOID_Table(t *testing.T) {
@@ -1410,10 +1420,813 @@ func TestParseTrackingRefOID_Table(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := parseTrackingRefOID(tc.out)
+			got, ok := parseTrackingRefOID(tc.out, ref)
 			if ok != tc.wantOK || got != tc.want {
 				t.Errorf("parseTrackingRefOID(%q) = (%q, %v), want (%q, %v)", tc.out, got, ok, tc.want, tc.wantOK)
 			}
 		})
+	}
+}
+
+// -- #1475: default-branch generalization (main, master, trunk, ...) --------
+
+// Every test below drives real temporary repos: a bare origin whose default
+// branch is the one under test, a clone of it, and a pass through syncMain or
+// syncMains. Assertions target refs, file bytes and the classified status, never
+// how many git commands ran.
+
+func init() {
+	// Hermetic default for every test in the package (#1475): the default branch
+	// is `main` and no test reaches the real `gh`. A test that cares about the
+	// metadata read swaps in its own stub through stubDefaultBranch.
+	defaultBranchFn = func(string) (string, error) { return "main", nil }
+}
+
+// stubDefaultBranch swaps the default-branch metadata seam for one test.
+func stubDefaultBranch(t *testing.T, fn func(repo string) (string, error)) {
+	t.Helper()
+	prev := defaultBranchFn
+	defaultBranchFn = fn
+	t.Cleanup(func() { defaultBranchFn = prev })
+}
+
+// fixedDefaultBranch makes every repo's metadata default branch name.
+func fixedDefaultBranch(t *testing.T, name string) {
+	t.Helper()
+	stubDefaultBranch(t, func(string) (string, error) { return name, nil })
+}
+
+// initBareOriginAndLocalOn is initBareOriginAndLocal for a remote whose default
+// branch is branch: a bare origin seeded with one commit, and a clone of it that
+// has branch checked out.
+func initBareOriginAndLocalOn(t *testing.T, branch string) (local, bare string) {
+	t.Helper()
+	bare = t.TempDir()
+	gitTest(t, bare, "init", "--bare", "-b", branch)
+	seed := t.TempDir()
+	gitTest(t, seed, "init", "-b", branch)
+	commitFile(t, seed, "base.txt", "base")
+	gitTest(t, seed, "remote", "add", "origin", bare)
+	gitTest(t, seed, "push", "origin", branch)
+	local = filepath.Join(t.TempDir(), "local")
+	gitTestNoDir(t, "clone", bare, local)
+	return local, bare
+}
+
+// pushFileOn advances the bare origin's branch by one commit writing content to
+// rel, made through a scratch clone.
+func pushFileOn(t *testing.T, bare, branch, rel, content string) {
+	t.Helper()
+	scratch := filepath.Join(t.TempDir(), "scratch")
+	gitTestNoDir(t, "clone", "--branch", branch, bare, scratch)
+	commitFile(t, scratch, rel, content)
+	gitTest(t, scratch, "push", "origin", branch)
+}
+
+// bareBranchOID is the object ID the bare origin's branch currently points at.
+func bareBranchOID(t *testing.T, bare, branch string) string {
+	t.Helper()
+	return gitTest(t, bare, "rev-parse", "refs/heads/"+branch)
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// repoSnapshot captures what a sync must never disturb on a checkout it
+// declines to touch: HEAD, the local branch list with its OIDs, the index, the
+// porcelain status and the bytes of every tracked file.
+func repoSnapshot(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, args := range [][]string{
+		{"rev-parse", "HEAD"},
+		{"for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"},
+		{"ls-files", "-s"},
+		{"status", "--porcelain"},
+	} {
+		fmt.Fprintf(&b, "$ git %s\n%s\n", strings.Join(args, " "), gitTest(t, dir, args...))
+	}
+	symbolic, _ := exec.Command("git", "-C", dir, "symbolic-ref", "-q", "HEAD").Output()
+	fmt.Fprintf(&b, "symbolic-ref: %s\n", strings.TrimSpace(string(symbolic)))
+	for _, f := range strings.Split(gitTest(t, dir, "ls-files"), "\n") {
+		if f != "" {
+			fmt.Fprintf(&b, "file %s: %q\n", f, readFile(t, filepath.Join(dir, f)))
+		}
+	}
+	return b.String()
+}
+
+// trunkBehind is a bare origin and clone whose default branch is trunk, with
+// the remote one commit ahead of the clone.
+func trunkBehind(t *testing.T) (local, bare string) {
+	t.Helper()
+	local, bare = initBareOriginAndLocalOn(t, "trunk")
+	pushFileOn(t, bare, "trunk", "advance.txt", "advance")
+	return local, bare
+}
+
+// forbiddenGitTokens are the arguments no sync command may ever carry: no push,
+// no force, no reset, stash, discard-checkout, restore, clean or rebase.
+var forbiddenGitTokens = map[string]bool{
+	"push": true, "--force": true, "-f": true, "--force-with-lease": true, "reset": true, "--hard": true,
+	"stash": true, "checkout": true, "restore": true, "clean": true, "rebase": true, "--rebase": true,
+}
+
+// installGitCommandLog puts a `git` shim first on PATH that appends every
+// invocation's argv to the returned log file before delegating.
+func installGitCommandLog(t *testing.T) string {
+	t.Helper()
+	logPath := filepath.Join(t.TempDir(), "git-calls.log")
+	installGitShim(t, fmt.Sprintf("printf '%%s\\n' \"$*\" >> %q", logPath))
+	return logPath
+}
+
+// assertSafeGitCommands fails when the logged git commands carry a forbidden
+// token, or when a fetch or merge runs without the hook suppression. It
+// returns the logged lines.
+func assertSafeGitCommands(t *testing.T, logPath string) []string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading git command log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		hooksOff, mutating := false, false
+		for _, f := range fields {
+			if forbiddenGitTokens[f] {
+				t.Errorf("git command carries the forbidden token %q: git %s", f, line)
+			}
+			switch f {
+			case "core.hooksPath=/dev/null":
+				hooksOff = true
+			case "fetch", "merge":
+				mutating = true
+			}
+		}
+		if mutating && !hooksOff {
+			t.Errorf("fetch/merge ran without -c core.hooksPath=/dev/null: git %s", line)
+		}
+	}
+	return lines
+}
+
+// TestSyncMain_DefaultBranchTable_FastForwardsToTheRemoteTip covers AC 1: real
+// temporary repos whose remote default branch is main, master and trunk, each
+// with the local default checkout strictly behind, end the pass with the local
+// branch fast-forwarded to the remote tip, and the pass logs the synced line
+// naming the fully qualified remote ref.
+func TestSyncMain_DefaultBranchTable_FastForwardsToTheRemoteTip(t *testing.T) {
+	for _, branch := range []string{"main", "master", "trunk"} {
+		t.Run(branch, func(t *testing.T) {
+			mainSyncGitEnv(t)
+			fixedDefaultBranch(t, branch)
+			local, bare := initBareOriginAndLocalOn(t, branch)
+			pushFileOn(t, bare, branch, "advance.txt", "advance")
+			want := bareBranchOID(t, bare, branch)
+
+			var buf bytes.Buffer
+			result := syncMains([]RepoConfig{{Repo: "o/r", Dir: local}}, &buf, false)["o/r"]
+
+			if result.Status != MainSyncSynced {
+				t.Fatalf("status = %q (%q), want MainSyncSynced", result.Status, result.Detail)
+			}
+			if got := gitTest(t, local, "rev-parse", "HEAD"); got != want {
+				t.Errorf("local HEAD = %s, want the remote %s tip %s", got, branch, want)
+			}
+			if got := gitTest(t, local, "rev-parse", "refs/heads/"+branch); got != want {
+				t.Errorf("local %s = %s, want the remote tip %s", branch, got, want)
+			}
+			if result.FreshRef != "HEAD" {
+				t.Errorf("FreshRef = %q, want HEAD after a real fast-forward", result.FreshRef)
+			}
+			if result.AutonomyRef != want {
+				t.Errorf("AutonomyRef = %q, want the confirmed remote tip %q", result.AutonomyRef, want)
+			}
+			wantLine := fmt.Sprintf("dispatch: main sync o/r: synced (fast-forwarded to refs/remotes/origin/%s)\n", branch)
+			if buf.String() != wantLine {
+				t.Errorf("log = %q, want %q", buf.String(), wantLine)
+			}
+		})
+	}
+}
+
+// TestSyncMain_OtherBranchCheckedOut_NotMainOrNotDefault_TouchesNothing covers
+// AC 4: a repo whose default is main keeps reporting not_main with the original
+// detail; any other default reports not_default naming both branches. HEAD, the
+// index, the work tree and the branch list are identical before and after, even
+// with the remote ahead.
+func TestSyncMain_OtherBranchCheckedOut_NotMainOrNotDefault_TouchesNothing(t *testing.T) {
+	cases := []struct {
+		defaultBranch string
+		wantStatus    MainSync
+		wantDetail    func(detail string) bool
+	}{
+		{"main", MainSyncNotMain, func(d string) bool { return d == `checked-out branch "feature" is not main` }},
+		{"master", MainSyncNotDefault, func(d string) bool { return strings.Contains(d, `"feature"`) && strings.Contains(d, `"master"`) }},
+		{"trunk", MainSyncNotDefault, func(d string) bool { return strings.Contains(d, `"feature"`) && strings.Contains(d, `"trunk"`) }},
+	}
+	for _, c := range cases {
+		t.Run(c.defaultBranch, func(t *testing.T) {
+			mainSyncGitEnv(t)
+			local, bare := initBareOriginAndLocalOn(t, c.defaultBranch)
+			pushFileOn(t, bare, c.defaultBranch, "advance.txt", "advance")
+			gitTest(t, local, "checkout", "-b", "feature")
+			commitFile(t, local, "feature.txt", "feature")
+			before := repoSnapshot(t, local)
+
+			result := syncMain(local, c.defaultBranch, false)
+
+			if result.Status != c.wantStatus {
+				t.Fatalf("status = %q (%q), want %q", result.Status, result.Detail, c.wantStatus)
+			}
+			if !c.wantDetail(result.Detail) {
+				t.Errorf("detail = %q does not name the checked-out and default branches as specified", result.Detail)
+			}
+			if after := repoSnapshot(t, local); after != before {
+				t.Errorf("checkout changed by the pass:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
+	}
+}
+
+// TestSyncMain_DefaultBranchRenamedOnRemote_ReportsNotDefaultNamingTheNewName
+// covers the rename edge case: the remote default moved from main to trunk
+// while the local checkout is still on main. The pass reports not_default
+// naming trunk, and the checkout is neither switched nor renamed.
+func TestSyncMain_DefaultBranchRenamedOnRemote_ReportsNotDefaultNamingTheNewName(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocalOn(t, "main")
+	gitTest(t, bare, "branch", "-m", "main", "trunk")
+	gitTest(t, bare, "symbolic-ref", "HEAD", "refs/heads/trunk")
+	before := repoSnapshot(t, local)
+
+	result := syncMain(local, "trunk", false)
+
+	if result.Status != MainSyncNotDefault {
+		t.Fatalf("status = %q (%q), want MainSyncNotDefault", result.Status, result.Detail)
+	}
+	if !strings.Contains(result.Detail, `"trunk"`) || !strings.Contains(result.Detail, `"main"`) {
+		t.Errorf("detail = %q, want it to name both the checked-out main and the new default trunk", result.Detail)
+	}
+	if got := gitTest(t, local, "symbolic-ref", "--short", "HEAD"); got != "main" {
+		t.Errorf("checked-out branch = %q, want it left on main", got)
+	}
+	if after := repoSnapshot(t, local); after != before {
+		t.Errorf("checkout changed by the pass:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// TestSyncMain_DetachedAndDiverged_OnANonMainDefault_LeaveTheCheckoutUntouched
+// covers AC 5 on a trunk default: a detached HEAD reports detached and a
+// diverged default branch reports diverged, with HEAD, the index and every
+// file byte unchanged.
+func TestSyncMain_DetachedAndDiverged_OnANonMainDefault_LeaveTheCheckoutUntouched(t *testing.T) {
+	t.Run("detached", func(t *testing.T) {
+		mainSyncGitEnv(t)
+		local, _ := trunkBehind(t)
+		gitTest(t, local, "checkout", "--detach")
+		before := repoSnapshot(t, local)
+
+		result := syncMain(local, "trunk", false)
+
+		if result.Status != MainSyncDetached {
+			t.Fatalf("status = %q (%q), want MainSyncDetached", result.Status, result.Detail)
+		}
+		if after := repoSnapshot(t, local); after != before {
+			t.Errorf("checkout changed:\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+	})
+	t.Run("diverged", func(t *testing.T) {
+		mainSyncGitEnv(t)
+		local, _ := trunkBehind(t)
+		commitFile(t, local, "local-only.txt", "local")
+		before := repoSnapshot(t, local)
+
+		result := syncMain(local, "trunk", false)
+
+		if result.Status != MainSyncDiverged {
+			t.Fatalf("status = %q (%q), want MainSyncDiverged", result.Status, result.Detail)
+		}
+		if after := repoSnapshot(t, local); after != before {
+			t.Errorf("checkout changed:\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+	})
+}
+
+// TestSyncMain_DirtyOverlap_ReportsDirtyWithBoundedListingAndKeepsEveryEdit
+// covers AC 6, first half: a fast-forward blocked by a local edit to a file it
+// would rewrite reports dirty, the detail is a one-line bounded porcelain
+// listing, and every edited file stays byte-identical.
+func TestSyncMain_DirtyOverlap_ReportsDirtyWithBoundedListingAndKeepsEveryEdit(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocalOn(t, "trunk")
+	pushFileOn(t, bare, "trunk", "base.txt", "changed-upstream")
+	const edit = "dirty-local-uncommitted"
+	if err := os.WriteFile(filepath.Join(local, "base.txt"), []byte(edit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 15; i++ {
+		if err := os.WriteFile(filepath.Join(local, fmt.Sprintf("noise%02d.txt", i)), []byte("n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	headBefore := gitTest(t, local, "rev-parse", "HEAD")
+
+	result := syncMain(local, "trunk", false)
+
+	if result.Status != MainSyncDirty {
+		t.Fatalf("status = %q (%q), want MainSyncDirty", result.Status, result.Detail)
+	}
+	if !strings.Contains(result.Detail, `M "base.txt"`) {
+		t.Errorf("detail = %q, want the porcelain listing to name the quoted path as `M \"base.txt\"`", result.Detail)
+	}
+	if strings.Contains(result.Detail, "\n") {
+		t.Errorf("detail = %q, want a single line", result.Detail)
+	}
+	if n := strings.Count(result.Detail, "noise"); n > 10 {
+		t.Errorf("detail lists %d noise entries, want the listing capped at about 10: %q", n, result.Detail)
+	}
+	if got := readFile(t, filepath.Join(local, "base.txt")); got != edit {
+		t.Errorf("base.txt = %q, want the local edit %q kept", got, edit)
+	}
+	if got := gitTest(t, local, "rev-parse", "HEAD"); got != headBefore {
+		t.Errorf("HEAD moved %s -> %s on a blocked fast-forward", headBefore, got)
+	}
+}
+
+// TestSyncMain_DirtyListing_QuotesUntrustedPathsAndKeepsOneLine pins the dirty
+// detail's path quoting: a tracked file name is untrusted, so each listed path is
+// strconv-quoted like every other untrusted value in the sync log line. A name
+// carrying an ESC byte and a tab reaches the log as escapes, never as raw
+// control bytes, and the line stays a single line.
+func TestSyncMain_DirtyListing_QuotesUntrustedPathsAndKeepsOneLine(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocalOn(t, "trunk")
+	const name = "x skip: y\x1b[31m\tz.txt"
+	pushFileOn(t, bare, "trunk", name, "v1")
+	gitTest(t, local, "pull", "--ff-only")
+	pushFileOn(t, bare, "trunk", name, "v2-upstream")
+	if err := os.WriteFile(filepath.Join(local, name), []byte("dirty-local"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := syncMain(local, "trunk", false)
+
+	if result.Status != MainSyncDirty {
+		t.Fatalf("status = %q (%q), want MainSyncDirty", result.Status, result.Detail)
+	}
+	if want := "M " + strconv.Quote(name); !strings.Contains(result.Detail, want) {
+		t.Errorf("detail = %q, want the quoted entry %s", result.Detail, want)
+	}
+	for _, raw := range []string{"\x1b", "\t", "\n", "\r"} {
+		if strings.Contains(result.Detail, raw) {
+			t.Errorf("detail = %q carries the raw control byte %q", result.Detail, raw)
+		}
+	}
+}
+
+// TestSyncMain_NonOverlappingLocalEdit_SyncsAndKeepsTheEdit covers AC 6, second
+// half: a fast-forward that does not touch the edited file succeeds, reports
+// synced, and keeps the local edit.
+func TestSyncMain_NonOverlappingLocalEdit_SyncsAndKeepsTheEdit(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocalOn(t, "trunk")
+	pushFileOn(t, bare, "trunk", "other.txt", "upstream-other")
+	const edit = "local-edit-to-an-untouched-file"
+	if err := os.WriteFile(filepath.Join(local, "base.txt"), []byte(edit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := syncMain(local, "trunk", false)
+
+	if result.Status != MainSyncSynced {
+		t.Fatalf("status = %q (%q), want MainSyncSynced", result.Status, result.Detail)
+	}
+	if got := gitTest(t, local, "rev-parse", "HEAD"); got != bareBranchOID(t, bare, "trunk") {
+		t.Errorf("HEAD = %s, want the remote tip", got)
+	}
+	if got := readFile(t, filepath.Join(local, "base.txt")); got != edit {
+		t.Errorf("base.txt = %q, want the local edit %q kept", got, edit)
+	}
+	if got := readFile(t, filepath.Join(local, "other.txt")); got != "upstream-other" {
+		t.Errorf("other.txt = %q, want the fast-forwarded upstream content", got)
+	}
+}
+
+// TestSyncMain_FastForwardFailsForANonEditReason_ReportsFailedNotDirty covers
+// the lock-file edge case: with a clean tree, an index lock makes the merge
+// fail for a reason that is not local edits, so the status is failed.
+func TestSyncMain_FastForwardFailsForANonEditReason_ReportsFailedNotDirty(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, _ := trunkBehind(t)
+	if err := os.WriteFile(filepath.Join(local, ".git", "index.lock"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	headBefore := gitTest(t, local, "rev-parse", "HEAD")
+
+	result := syncMain(local, "trunk", false)
+
+	if result.Status != MainSyncFailed {
+		t.Fatalf("status = %q (%q), want MainSyncFailed (a lock file is not a dirty tree)", result.Status, result.Detail)
+	}
+	if got := gitTest(t, local, "rev-parse", "HEAD"); got != headBefore {
+		t.Errorf("HEAD moved %s -> %s although the merge failed", headBefore, got)
+	}
+}
+
+// TestSyncMain_InvalidDefaultBranchName_ReportsUnreadableAndFetchesNothing
+// covers the invalid-metadata edge case: an empty name, or one that fails
+// `git check-ref-format --branch` (or that it would expand), reports
+// default_branch_unreadable and runs no fetch -- the tracking ref the remote's
+// new commit would have moved stays put and no autonomy ref is produced.
+func TestSyncMain_InvalidDefaultBranchName_ReportsUnreadableAndFetchesNothing(t *testing.T) {
+	names := []string{"", "bad..name", "a b", "-leading-dash", "@{-1}", "trailing.lock", "with~tilde", "ends/", "/starts", "with\nnewline"}
+	for _, name := range names {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			mainSyncGitEnv(t)
+			local, bare := initBareOriginAndLocalOn(t, "main")
+			pushFileOn(t, bare, "main", "advance.txt", "advance")
+			trackingBefore := gitTest(t, local, "rev-parse", "refs/remotes/origin/main")
+
+			result := syncMain(local, name, false)
+
+			if result.Status != MainSyncDefaultBranchUnreadable {
+				t.Fatalf("status = %q (%q), want MainSyncDefaultBranchUnreadable", result.Status, result.Detail)
+			}
+			if result.AutonomyRef != "" {
+				t.Errorf("AutonomyRef = %q, want empty: never authorize without a valid default branch", result.AutonomyRef)
+			}
+			if got := gitTest(t, local, "rev-parse", "refs/remotes/origin/main"); got != trackingBefore {
+				t.Errorf("tracking ref moved %s -> %s: a fetch ran for an invalid default branch name", trackingBefore, got)
+			}
+			if strings.Contains(result.Detail, "\n") {
+				t.Errorf("detail = %q, want a single line", result.Detail)
+			}
+		})
+	}
+}
+
+// TestSyncMains_MetadataReadFails_ReportsUnreadableWithTheReasonAndFetchesNothing
+// covers AC 7, first sentence: a failed metadata read reports
+// default_branch_unreadable with the reason on the one log line, and runs no
+// fetch. A repo with no Dir configured never reaches the metadata read at all.
+func TestSyncMains_MetadataReadFails_ReportsUnreadableWithTheReasonAndFetchesNothing(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocalOn(t, "main")
+	pushFileOn(t, bare, "main", "advance.txt", "advance")
+	trackingBefore := gitTest(t, local, "rev-parse", "refs/remotes/origin/main")
+	var asked []string
+	stubDefaultBranch(t, func(repo string) (string, error) {
+		asked = append(asked, repo)
+		return "", fmt.Errorf("gh api failed")
+	})
+
+	var buf bytes.Buffer
+	got := syncMains([]RepoConfig{{Repo: "o/r", Dir: local}, {Repo: "o/nodir", Dir: ""}}, &buf, false)
+
+	if got["o/r"].Status != MainSyncDefaultBranchUnreadable {
+		t.Fatalf("status = %q (%q), want MainSyncDefaultBranchUnreadable", got["o/r"].Status, got["o/r"].Detail)
+	}
+	if got["o/r"].AutonomyRef != "" {
+		t.Errorf("AutonomyRef = %q, want empty", got["o/r"].AutonomyRef)
+	}
+	if !strings.Contains(buf.String(), "dispatch: main sync o/r: default_branch_unreadable (default branch metadata read failed") {
+		t.Errorf("log = %q, want the unreadable status with the metadata-read reason", buf.String())
+	}
+	if gotRef := gitTest(t, local, "rev-parse", "refs/remotes/origin/main"); gotRef != trackingBefore {
+		t.Errorf("tracking ref moved %s -> %s: a fetch ran without a default branch", trackingBefore, gotRef)
+	}
+	if got["o/nodir"].Status != MainSyncSkipped {
+		t.Errorf("no-dir repo status = %q, want the ungated MainSyncSkipped", got["o/nodir"].Status)
+	}
+	if len(asked) != 1 || asked[0] != "o/r" {
+		t.Errorf("metadata asked for %v, want only the repo that has a Dir", asked)
+	}
+}
+
+// TestSyncMain_RemoteLacksTheNamedDefaultBranch_ReportsFetchFailed covers the
+// Q&A 4 split: a well-formed name whose refs/remotes/origin/<name> is absent
+// after a successful fetch is fetch_failed, with no autonomy ref.
+func TestSyncMain_RemoteLacksTheNamedDefaultBranch_ReportsFetchFailed(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, _ := initBareOriginAndLocalOn(t, "main")
+	gitTest(t, local, "checkout", "-b", "trunk")
+
+	result := syncMain(local, "trunk", false)
+
+	if result.Status != MainSyncFetchFailed {
+		t.Fatalf("status = %q (%q), want MainSyncFetchFailed", result.Status, result.Detail)
+	}
+	if !strings.Contains(result.Detail, "absent") || !strings.Contains(result.Detail, "refs/remotes/origin/trunk") {
+		t.Errorf("detail = %q, want the absent refs/remotes/origin/trunk reason", result.Detail)
+	}
+	if result.AutonomyRef != "" {
+		t.Errorf("AutonomyRef = %q, want empty", result.AutonomyRef)
+	}
+}
+
+// TestSyncMain_LocalBranchNamedOriginDefault_DoesNotShadowTheTrackingRef covers
+// the shadow edge case on main and trunk: a local branch literally named
+// origin/<default> carrying extra commits must not be the fast-forward target.
+// git resolves the short form refs/heads/origin/<d> before refs/remotes/origin/<d>,
+// so only the fully qualified ref reaches the remote tip.
+func TestSyncMain_LocalBranchNamedOriginDefault_DoesNotShadowTheTrackingRef(t *testing.T) {
+	for _, branch := range []string{"main", "trunk"} {
+		t.Run(branch, func(t *testing.T) {
+			mainSyncGitEnv(t)
+			local, bare := initBareOriginAndLocalOn(t, branch)
+			pushFileOn(t, bare, branch, "advance.txt", "advance")
+			want := bareBranchOID(t, bare, branch)
+			gitTest(t, local, "checkout", "-b", "shadow-tmp")
+			commitFile(t, local, "shadow.txt", "shadow")
+			gitTest(t, local, "branch", "origin/"+branch, "shadow-tmp")
+			gitTest(t, local, "checkout", branch)
+			gitTest(t, local, "branch", "-D", "shadow-tmp")
+			shadowOID := gitTest(t, local, "rev-parse", "refs/heads/origin/"+branch)
+
+			result := syncMain(local, branch, false)
+
+			if result.Status != MainSyncSynced {
+				t.Fatalf("status = %q (%q), want MainSyncSynced", result.Status, result.Detail)
+			}
+			if got := gitTest(t, local, "rev-parse", "HEAD"); got != want {
+				t.Errorf("HEAD = %s, want the remote tip %s (shadow branch tip is %s)", got, want, shadowOID)
+			}
+			if _, err := os.Stat(filepath.Join(local, "shadow.txt")); err == nil {
+				t.Errorf("shadow.txt exists: the shadow branch was merged into the default branch")
+			}
+			if result.AutonomyRef != want {
+				t.Errorf("AutonomyRef = %q, want the remote tip %q", result.AutonomyRef, want)
+			}
+		})
+	}
+}
+
+// TestSyncMain_LsRemoteConfirmationMatrix_OnANonMainDefault covers the ls-remote
+// edge case on trunk: no advertised line, several lines or a malformed OID leave
+// the autonomy ref empty with a one-line reason, and the sync status is
+// unaffected (still a fast-forward that really happened).
+func TestSyncMain_LsRemoteConfirmationMatrix_OnANonMainDefault(t *testing.T) {
+	line := func(oid string) string { return fmt.Sprintf("printf '%%s\\trefs/heads/trunk\\n' %s", oid) }
+	cases := []struct {
+		name       string
+		shimBody   string
+		wantReason string
+	}{
+		{"no line", "exit 2", "not advertised"},
+		{"several lines", line(testOID40) + "; " + line(testOID40) + "; exit 0", "malformed"},
+		{"malformed oid", line("nothex") + "; exit 0", "malformed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mainSyncGitEnv(t)
+			local, bare := trunkBehind(t)
+			installGitShim(t, fmt.Sprintf("for a in \"$@\"; do if [ \"$a\" = ls-remote ]; then %s; fi; done", c.shimBody))
+
+			result := syncMain(local, "trunk", false)
+
+			if result.Status != MainSyncSynced {
+				t.Fatalf("status = %q (%q), want the sync status unaffected (MainSyncSynced)", result.Status, result.Detail)
+			}
+			if got := gitTest(t, local, "rev-parse", "HEAD"); got != bareBranchOID(t, bare, "trunk") {
+				t.Errorf("HEAD = %s, want the fast-forward to have happened", got)
+			}
+			if result.AutonomyRef != "" {
+				t.Errorf("AutonomyRef = %q, want empty when the remote tip is not confirmed", result.AutonomyRef)
+			}
+			if !strings.Contains(result.AutonomyDetail, c.wantReason) || strings.Contains(result.AutonomyDetail, "\n") {
+				t.Errorf("AutonomyDetail = %q, want a one-line reason containing %q", result.AutonomyDetail, c.wantReason)
+			}
+		})
+	}
+}
+
+// TestSyncMain_BranchChangedBetweenFetchAndMerge_OnANonMainDefault_ReportsNotDefault
+// covers the TOCTOU edge case on trunk: the checkout moves to another branch
+// during the fetch, the pass reports not_default with the "changed before merge"
+// detail, and the trunk ref is never fast-forwarded.
+func TestSyncMain_BranchChangedBetweenFetchAndMerge_OnANonMainDefault_ReportsNotDefault(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, _ := trunkBehind(t)
+	trunkBefore := gitTest(t, local, "rev-parse", "trunk")
+	installGitShim(t, `case " $* " in *" fetch "*) "$REAL_GIT" "$@"; s=$?; "$REAL_GIT" -C "$2" checkout -b sneaky >/dev/null 2>&1; exit $s ;; esac`)
+
+	result := syncMain(local, "trunk", false)
+
+	if result.Status != MainSyncNotDefault || result.Detail != "checked-out branch changed before merge" {
+		t.Fatalf("status = %q, detail = %q, want not_default / %q", result.Status, result.Detail, "checked-out branch changed before merge")
+	}
+	if got := gitTest(t, local, "rev-parse", "trunk"); got != trunkBefore {
+		t.Errorf("trunk = %s, want unchanged %s: no merge may run after the branch changed", got, trunkBefore)
+	}
+}
+
+// TestSyncMain_DryRun_ReadsTheFullyQualifiedRefAndNeverMerges covers AC 8 at the
+// sync layer: a dry run fetches and classifies, names refs/remotes/origin/<d> as
+// the freshness ref, and never merges; the real pass reads HEAD after the
+// fast-forward, at the same object.
+func TestSyncMain_DryRun_ReadsTheFullyQualifiedRefAndNeverMerges(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := trunkBehind(t)
+	headBefore := gitTest(t, local, "rev-parse", "HEAD")
+	want := bareBranchOID(t, bare, "trunk")
+
+	dry := syncMain(local, "trunk", true)
+
+	if dry.Status != MainSyncSynced || dry.FreshRef != "refs/remotes/origin/trunk" {
+		t.Fatalf("dry run = (%q, FreshRef %q), want (synced, refs/remotes/origin/trunk)", dry.Status, dry.FreshRef)
+	}
+	if got := gitTest(t, local, "rev-parse", "HEAD"); got != headBefore {
+		t.Errorf("dry run moved HEAD %s -> %s", headBefore, got)
+	}
+	if got := gitTest(t, local, "rev-parse", dry.FreshRef); got != want {
+		t.Errorf("the dry run's freshness ref resolves to %s, want the remote tip %s", got, want)
+	}
+
+	real := syncMain(local, "trunk", false)
+
+	if real.Status != MainSyncSynced || real.FreshRef != "HEAD" {
+		t.Fatalf("real pass = (%q, FreshRef %q), want (synced, HEAD)", real.Status, real.FreshRef)
+	}
+	if got := gitTest(t, local, "rev-parse", real.FreshRef); got != want {
+		t.Errorf("the real pass's freshness ref resolves to %s, want the same remote tip %s", got, want)
+	}
+}
+
+// TestSyncMain_CommandLog_CarriesNoForbiddenFlagsAndKeepsHooksOff covers AC 20:
+// across a clean fast-forward, a dirty refusal, a non-overlapping edit, a
+// not-default checkout, a divergence and a dry run, no git command carries a
+// forbidden token, and every fetch and merge disables hooks.
+func TestSyncMain_CommandLog_CarriesNoForbiddenFlagsAndKeepsHooksOff(t *testing.T) {
+	scenarios := []struct {
+		name  string
+		setup func(t *testing.T, local, bare string)
+		dry   bool
+	}{
+		{"clean fast-forward", func(*testing.T, string, string) {}, false},
+		{"dirty overlap", func(t *testing.T, local, bare string) {
+			pushFileOn(t, bare, "trunk", "base.txt", "upstream")
+			if err := os.WriteFile(filepath.Join(local, "base.txt"), []byte("edit"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"non-overlapping edit", func(t *testing.T, local, _ string) {
+			if err := os.WriteFile(filepath.Join(local, "base.txt"), []byte("edit"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"not default", func(t *testing.T, local, _ string) { gitTest(t, local, "checkout", "-b", "feature") }, false},
+		{"diverged", func(t *testing.T, local, _ string) { commitFile(t, local, "local-only.txt", "local") }, false},
+		{"dry run", func(*testing.T, string, string) {}, true},
+	}
+	for _, s := range scenarios {
+		t.Run(s.name, func(t *testing.T) {
+			mainSyncGitEnv(t)
+			local, bare := trunkBehind(t)
+			s.setup(t, local, bare)
+			logPath := installGitCommandLog(t)
+
+			syncMain(local, "trunk", s.dry)
+
+			lines := assertSafeGitCommands(t, logPath)
+			sawFetch := false
+			for _, l := range lines {
+				if strings.Contains(l, " fetch ") {
+					sawFetch = true
+				}
+			}
+			if s.name != "not default" && !sawFetch {
+				t.Errorf("expected a fetch in the command log, got:\n%s", strings.Join(lines, "\n"))
+			}
+			if s.dry {
+				for _, l := range lines {
+					if strings.Contains(l, " merge ") {
+						t.Errorf("dry run ran a merge: git %s", l)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestSyncMain_RealFastForwardMergesTheFullyQualifiedRef pins the merge target:
+// the fast-forward names refs/remotes/origin/<d>, never the short form a local
+// branch could shadow.
+func TestSyncMain_RealFastForwardMergesTheFullyQualifiedRef(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, _ := trunkBehind(t)
+	logPath := installGitCommandLog(t)
+
+	syncMain(local, "trunk", false)
+
+	lines := assertSafeGitCommands(t, logPath)
+	merged := false
+	for _, l := range lines {
+		if strings.Contains(l, " merge ") {
+			merged = true
+			if !strings.HasSuffix(l, "--ff-only refs/remotes/origin/trunk") {
+				t.Errorf("merge command = git %s, want it to end with --ff-only refs/remotes/origin/trunk", l)
+			}
+		}
+	}
+	if !merged {
+		t.Errorf("no merge ran:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestFetchDefaultBranch_ReadsTheRepositoryMetadataThroughGhAPI pins the real
+// metadata read (#1475): one `gh api repos/<repo> --jq {default_branch:...}` call
+// (an object projection, mirroring babysit's fetchDefaultBranch), the decoded
+// value as the answer, and a failed call as an error that never carries gh's
+// stderr.
+func TestFetchDefaultBranch_ReadsTheRepositoryMetadataThroughGhAPI(t *testing.T) {
+	callLog := filepath.Join(t.TempDir(), "gh-calls.log")
+	installFakeGHOnPath(t, fmt.Sprintf(`printf '%%s\n' "$*" >> %q
+case "$1 $2" in
+  "api repos/o/r") printf '{"default_branch":"trunk"}\n' ;;
+  *) echo "secret-host.example: connection refused" >&2; exit 1 ;;
+esac
+`, callLog))
+
+	got, err := fetchDefaultBranch("o/r")
+	if err != nil || got != "trunk" {
+		t.Fatalf("fetchDefaultBranch(o/r) = (%q, %v), want (trunk, nil)", got, err)
+	}
+	if calls := readFile(t, callLog); calls != "api repos/o/r --jq {default_branch:.default_branch}\n" {
+		t.Errorf("gh calls = %q, want exactly one `api repos/o/r --jq {default_branch:.default_branch}`", calls)
+	}
+
+	if _, err := fetchDefaultBranch("o/missing"); err == nil {
+		t.Fatal("fetchDefaultBranch on a failing gh returned nil error")
+	} else if strings.Contains(err.Error(), "secret-host.example") {
+		t.Errorf("error = %q leaks gh's stderr", err)
+	}
+}
+
+// TestFetchDefaultBranch_NullMissingOrEmptyMetadata_IsAnUnreadableError pins the
+// projection decode (#1475): gh --jq prints the literal `null` for a JSON null,
+// so a null, missing or empty default_branch must be an error, never the branch
+// name "null".
+func TestFetchDefaultBranch_NullMissingOrEmptyMetadata_IsAnUnreadableError(t *testing.T) {
+	for name, body := range map[string]string{
+		"null":    `{"default_branch":null}`,
+		"missing": `{}`,
+		"empty":   `{"default_branch":""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			installFakeGHOnPath(t, "printf '%s\\n' '"+body+"'\n")
+			got, err := fetchDefaultBranch("o/r")
+			if err == nil {
+				t.Fatalf("fetchDefaultBranch = (%q, nil), want an error for a %s default_branch", got, name)
+			}
+			if got != "" {
+				t.Errorf("fetchDefaultBranch returned %q alongside the error, want empty", got)
+			}
+		})
+	}
+}
+
+// TestSyncMains_NullDefaultBranchMetadata_ReportsUnreadableAndFetchesNothing runs
+// the real metadata read against a gh that reports a JSON null default_branch:
+// the pass reports default_branch_unreadable (a retry never helps), not
+// fetch_failed for a branch literally named "null", and no fetch runs.
+func TestSyncMains_NullDefaultBranchMetadata_ReportsUnreadableAndFetchesNothing(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocalOn(t, "main")
+	pushFileOn(t, bare, "main", "advance.txt", "advance")
+	trackingBefore := gitTest(t, local, "rev-parse", "refs/remotes/origin/main")
+	stubDefaultBranch(t, fetchDefaultBranch)
+	installFakeGHOnPath(t, "printf '%s\\n' '{\"default_branch\":null}'\n")
+	logPath := installGitCommandLog(t)
+
+	var buf bytes.Buffer
+	got := syncMains([]RepoConfig{{Repo: "o/r", Dir: local}}, &buf, false)
+
+	if got["o/r"].Status != MainSyncDefaultBranchUnreadable {
+		t.Fatalf("status = %q (%q), want MainSyncDefaultBranchUnreadable", got["o/r"].Status, got["o/r"].Detail)
+	}
+	if got["o/r"].AutonomyRef != "" {
+		t.Errorf("AutonomyRef = %q, want empty", got["o/r"].AutonomyRef)
+	}
+	if !strings.Contains(buf.String(), "dispatch: main sync o/r: default_branch_unreadable (default branch metadata read failed") {
+		t.Errorf("log = %q, want the unreadable status with the metadata-read reason", buf.String())
+	}
+	if data, err := os.ReadFile(logPath); err == nil {
+		for _, l := range strings.Split(string(data), "\n") {
+			if strings.Contains(l, " fetch ") || strings.HasPrefix(l, "fetch ") {
+				t.Errorf("a fetch ran for a null default branch: git %s", l)
+			}
+		}
+	}
+	if gotRef := gitTest(t, local, "rev-parse", "refs/remotes/origin/main"); gotRef != trackingBefore {
+		t.Errorf("tracking ref moved %s -> %s: a fetch ran without a default branch", trackingBefore, gotRef)
 	}
 }

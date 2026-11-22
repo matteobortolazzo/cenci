@@ -90,7 +90,8 @@ attention notification does not suppress the first automatic repair after upgrad
 Apart from those automatic clears (a fresh green read of the current head, a conflict
 episode ending), `cenci babysit reset <pr>` (host-only; refuses inside a sandbox) is the
 supported way to zero a paused PR's budget while keeping its feedback bookkeeping. It
-also clears `ciRepairPaused`, `ciCapNotified` and `ciRepairTracked`. A recorded PID that is no longer
+also clears `ciRepairPaused`, `ciCapNotified`, `ciRepairTracked` and `branchUpdate` (#1475, the
+behind-branch update record below; with the five budget fields that is nine fields in all). A recorded PID that is no longer
 running is treated as gone: its stale lock is cleared before the reset re-arms. A lock
 naming a live supervisor for the PR, or an empty or unparseable lock, is refused and
 nothing is changed (confirm no supervisor is running and delete the lock file to
@@ -303,6 +304,103 @@ reading `repairing`, and false once that entry is released (the worker is gone).
 ledger cannot be read, nothing proved the worker gone and the previous value stands. A
 repair worker with no ledger entry (launched before the ledger existed) reads
 `monitoring` on a quiet tick until a tick that probes.
+
+## Behind-branch update (#1475)
+
+A PR whose branch is behind its base used to hold forever at `PR branch is behind base`. The
+supervisor now catches it up itself, once per observed (head OID, base OID) pair, with one
+server-side update that is never a rebase and never a force-push. The code is
+`internal/babysit/branchupdate.go`; the call sits in `tick` right after the conflict and CI
+repair decisions, because conflict repair owns the branch first.
+
+**When it happens.** Only for a clean `BEHIND` PR: `mergeStateStatus` `BEHIND` and `mergeable`
+`MERGEABLE`, with a known head, base and head branch name and no live branch writer. The call
+is the GraphQL `updatePullRequestBranch` mutation, issued through `gh api graphql` with
+`updateMethod: MERGE` and `expectedHeadOid` set to the head this tick observed, so a push by
+anyone else between the read and the call is refused by the server and never merged over. It
+is not `gh pr update-branch` (which re-reads the head itself and pins to that) and never uses
+`--rebase`. Just before the call a preflight query re-reads the PR's node id, head, base,
+merge-queue state, fork state and `mergeStateStatus`; if the head or base differs from the tick's
+first read, or the PR is no longer `BEHIND`, the tick makes no call and logs `branch update
+skipped: ...` (the next tick re-evaluates from fresh reads). An update targets the PR's own
+`baseRefName`: a stacked PR is caught up against its base, never retargeted, and the merge
+policy still holds it with `PR base is not the default branch`.
+
+The update never writes `automerge:ok` or any other merge grant. It runs the same way with the
+fleet `automerge.enabled` on and in PR-only mode, as part of ordinary supervision (there is no
+separate setting; an armed PR under the usual enrollment and automatic-work controls gets it),
+and a PR updated with automerge off is never merged.
+
+**Conflicts.** A `CONFLICTING`/`DIRTY` PR makes zero update calls: it opens the existing bounded
+`merge-repair` episode (three launches, then input needed, above). A PR that turns `DIRTY` after
+an update, for example through a base race, goes to that episode too, not to another update.
+While a conflict episode is held, or `mergeable` is `UNKNOWN`, no update is made.
+
+**One attempt per pair; the cap of three.** The record is `State.BranchUpdate` (`branchUpdate`
+in the JSON, additive and `omitempty`, no schema bump): the pair `headSha`/`baseSha` the last
+attempt was made at, its `outcome` (`issued`, `updated`, `failed`, `unsupported`),
+`failedAttempts`, `reason`, `attemptedAt` and `notified`. A pair gets at most one attempt,
+whatever it came to: polls and supervisor restarts at the same (head, base) make no second call.
+A new base OID (or a new head) is a new pair and starts one new attempt.
+
+- A successful call is recorded `issued`, logged `branch update issued for head <h> on base
+  <b>`, and settled by a later tick's read: a head that moved off the attempted one records
+  `updated`, zeroes the failure streak and ends the update. The merge commit is created
+  asynchronously, so a successful call whose re-read head is unchanged stays `issued`: it is
+  never recorded as updated, it makes no second call, and the tick stays actionable until the head
+  moves. The babysit-review launch waits out the tick that issued the update.
+- Any `gh` or API error, a timeout and a server rejection (an `expectedHeadOid` race
+  included) is one failed attempt: `branch update failed (attempt N of 3): <reason>`, with the
+  cause sanitized to one line. The third consecutive failed attempt across base movements is the
+  exhausted hold below.
+- `UNKNOWN` mergeability, a failed PR read, an unknown head or base, a failed or stale
+  preflight read, an unreadable capacity ledger and any deferral consume no attempt.
+
+**Deferral to a live writer.** The update spawns no worker, so it takes no capacity slot, but it
+never writes a branch another writer holds. It defers, logging `PR #<pr>: branch update
+deferred: <writer> active`, when any of these is true: a `<pr>-ci-repair`,
+`<pr>-merge-repair`, `<pr>-babysit-review` or `<pr>-address-review` window is live in the
+recorded session (the same per-tick pane read as above); a repair was launched this tick or was
+refused for capacity and will launch later (`a repair is waiting for capacity`); or the shared
+capacity ledger holds an entry for this repo and `headRefName`, whatever its kind, dispatch's
+or babysit's (the `<writer>` is that entry's kind). An unreadable ledger cannot say there is no
+such writer, so it defers too, with the ledger's reason. A deferral consumes nothing; the next
+tick tries again. Two supervisors for one PR cannot both run (the supervisor lock), so one (head,
+base) pair never sees two calls.
+
+**Unsupported and exhausted holds.** Two outcomes need a human and are sticky: no further
+update is made at that PR until `cenci babysit reset <pr>`.
+
+- *Unsupported*: a cross-repository (fork) PR, a PR in a merge queue, or an update the server
+  refused with a GraphQL `FORBIDDEN` error (branch protection or the token's permissions).
+  Recorded `unsupported` with the reason `cross-repository PR`, `merge queue` or `branch
+  protection`; the status reads `input needed: branch update unsupported (<reason>)`.
+- *Exhausted*: three consecutive failed attempts. The status reads `input needed: branch update
+  attempts exhausted`.
+
+Each hold sets status `needs-input`, appends its note to `automergeDetail` and opens one
+`babysit-attention` session (the `babysit-attention` notice), once per hold: `notified` is set
+only after a successful launch, and a failed launch is retried on the next tick. The note ends
+`; update the PR branch yourself, then cenci babysit reset <pr> re-arms the branch update`. The
+hold survives a restart (a re-armed supervisor starts as `needs-input`) and `cenci babysit stop`
+(which keeps the record, above). `cenci babysit reset <pr>` clears the record, so a PR that is still `BEHIND` is tried
+again once. Neither hold clears by itself, not even when the head or base moves (for example
+after you update the branch by hand): the reset is the recovery.
+
+**Restart safety.** The attempt is written to the state file before the call (the `Run` loop calls
+`tickWith` with a checkpoint; `tick` is the wrapper that passes none). A supervisor that dies between the call and its next save restarts to find
+that pair already attempted and makes no second call; the next tick's read settles it as
+`updated` or leaves it `issued`. A checkpoint that cannot be written makes no call and the tick
+returns the error.
+
+**The merge gate is unchanged and stricter.** The `mergeable` stage now holds `PR branch is behind
+base` whenever `mergeStateStatus` is `BEHIND`, even when `mergeable` is `MERGEABLE`, so a green
+behind PR can no longer reach `gh pr merge` on a stale base. After an update the PR waits on the
+checks and feedback of the new head (a check in the `pending` bucket holds), and the final
+`recheckAutomergeInputs` still re-reads the head (the `--match-head-commit` pin), CI buckets,
+feedback state, repo policy and the per-ticket grant on the new head: a change in any one holds
+the merge under that gate's own reason. No command in this path pushes with force, resets,
+stashes or discards.
 
 ## PR discussion, the review worker and receipts (#1472)
 
@@ -644,7 +742,10 @@ bookkeeping (`heldUntrustedKeys`, `untrustedLaunchCounts` and `headMoveHold`, so
 re-arm never drops a security hold), the resolution-actor bookkeeping (`actorHeldKeys` and
 `actorAttestations`, #862; `reset` never clears either) and `automergePin` (#870: the
 closing-issue set and base ref pinned at arm or on the first successful tick; it survives stop,
-re-arm and `reset`, is never overwritten, and is gone only with the state file). Budgets, the agent,
+re-arm and `reset`, is never overwritten, and is gone only with the state file) and `branchUpdate`
+(#1475, the per-pair update record: a stop and re-arm never repeats an update already issued at
+the same (head, base) pair and never drops an unsupported or exhausted hold; unlike the pin,
+`reset` clears it). Budgets, the agent,
 CI status and closing issues are cleared, so a re-arm adopts a fresh agent, the retry budgets
 restart as they always have and unresolved feedback keeps its hold. A comment posted while
 supervision was down is collected on the first tick after re-arm. `status` prints `stopped` for

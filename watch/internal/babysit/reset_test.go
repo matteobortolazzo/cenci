@@ -868,6 +868,43 @@ func TestReset_CIPausedLiveSupervisorClearsAllEightFields(t *testing.T) {
 	}
 }
 
+// #1475: a reset also clears the branch-update record, so an exhausted or
+// unsupported hold is re-armed; feedback bookkeeping is kept.
+func TestReset_ClearsTheBranchUpdateRecordAndKeepsTheFeedback(t *testing.T) {
+	for _, outcome := range []string{"exhausted", "unsupported"} {
+		t.Run(outcome, func(t *testing.T) {
+			e := newResetEnv(t)
+			s := pausedState()
+			s.BranchUpdate = &branchUpdate{HeadSHA: "head-1", BaseSHA: "base-1", Outcome: "failed", FailedAttempts: 3, Reason: "boom", Notified: true}
+			if outcome == "unsupported" {
+				s.BranchUpdate = &branchUpdate{HeadSHA: "head-1", BaseSHA: "base-1", Outcome: "unsupported", Reason: "merge queue", Notified: true}
+			}
+			writeStateFile(t, e.path, s)
+
+			done := captureStdout(t)
+			err := Reset("42", e.dir, nil)
+			_ = done()
+			if err != nil {
+				t.Fatalf("Reset: %v", err)
+			}
+
+			got := mustReadState(t, e.path)
+			if got.BranchUpdate != nil {
+				t.Errorf("branchUpdate after reset = %+v, want it cleared", got.BranchUpdate)
+			}
+			if raw := string(readFileBytes(t, e.path)); strings.Contains(raw, "branchUpdate") {
+				t.Errorf("state file still carries branchUpdate after the reset: %s", raw)
+			}
+			if !reflect.DeepEqual(got.PendingKeys, []string{"comment:2"}) || got.ConflictRepairSHA != "sha-r" {
+				t.Errorf("reset changed what it must keep: pending=%v conflictRepairSha=%q", got.PendingKeys, got.ConflictRepairSHA)
+			}
+			if len(e.started) != 1 {
+				t.Errorf("supervisor starts = %d, want 1", len(e.started))
+			}
+		})
+	}
+}
+
 // #1456 AC 8: stop against the live PID of a CI-paused supervisor signals that
 // process and removes the state.
 func TestStop_CIPausedLiveSupervisorIsSignalledAndStateRemoved(t *testing.T) {
