@@ -68,7 +68,7 @@ rebuild)
     [[ "$*" == *'@openai/codex'* ]] && agent=codex
     [[ "$*" == *'opencode-ai'* ]] && agent=opencode
     if [[ "${HEALTH_FAIL:-0}" -eq 1 ]]; then status=19; else status=0; fi
-    printf '#!/bin/sh\necho "%s"\nexit %s\n' "${MOCK_VERSION}" "${status}" >"${prefix}/node_modules/.bin/${agent}"
+    printf '#!/bin/sh\necho "%s"\nexit %s\n' "${HEALTH_VERSION:-${MOCK_VERSION}}" "${status}" >"${prefix}/node_modules/.bin/${agent}"
     chmod +x "${prefix}/node_modules/.bin/${agent}"
     ;;
 *) exit 64 ;;
@@ -119,7 +119,7 @@ run_update() {
         MOCK_INTEGRITY="${MOCK_INTEGRITY}" ATTESTATION_JSON="${ATTESTATION_JSON}" \
         NO_PROVENANCE="${NO_PROVENANCE:-0}" NO_SIGNATURES="${NO_SIGNATURES:-0}" \
         NPM_VIEW_FAIL="${NPM_VIEW_FAIL:-0}" NPM_AUDIT_FAIL="${NPM_AUDIT_FAIL:-0}" \
-        LOCK_INTEGRITY="${LOCK_INTEGRITY:-}" HEALTH_FAIL="${HEALTH_FAIL:-0}" \
+        LOCK_INTEGRITY="${LOCK_INTEGRITY:-}" HEALTH_FAIL="${HEALTH_FAIL:-0}" HEALTH_VERSION="${HEALTH_VERSION:-}" \
         NPM_CONCURRENCY_MARKER="${NPM_CONCURRENCY_MARKER:-}" NPM_OVERLAP="${NPM_OVERLAP:-}" \
         REBUILD_WAIT_FILE="${REBUILD_WAIT_FILE:-}" \
         bash "${ROOT}/sandbox/lib/agent-cli.sh" update "${agent}" ${version:+"${version}"} "$@"
@@ -166,6 +166,52 @@ new_case exact 1.4.0
 if run_update claude 1.4.0 >/dev/null \
     && [[ "$(cat "${ROOT_DIR}/current/VERSION")" == 1.4.0 ]] \
     && grep -Fq -- '@anthropic-ai/claude-code@1.4.0' "${CALL_LOG}"; then pass; else fail "exact version was not honored"; fi
+
+echo "case: follow-host updates and downgrades without pinning or removing live releases"
+new_case follow
+follow_ok=true
+old_exe=''
+for MOCK_VERSION in 1.2.3 1.3.0 1.1.0; do
+    run_update codex "${MOCK_VERSION}" --follow-host >/dev/null || { follow_ok=false; break; }
+    installed="${ROOT_DIR}/current/node_modules/.bin/codex"
+    [[ "$("${installed}" --version)" == "${MOCK_VERSION}" && ! -e "${ROOT_DIR}/PIN" ]] || follow_ok=false
+    if [[ -z "${old_exe}" ]]; then old_exe="$(realpath "${installed}")" || follow_ok=false; fi
+done
+if "${follow_ok}" && [[ -x "${old_exe}" && "$("${old_exe}" --version)" == 1.2.3 ]]; then pass; else fail "follow-host activation or old release retention"; fi
+
+echo "case: returning to a retained verified version reuses its installation offline"
+: >"${CALL_LOG}"
+if NPM_VIEW_FAIL=1 run_update codex 1.2.3 --follow-host >/dev/null &&
+    [[ "$(realpath "${ROOT_DIR}/current/node_modules/.bin/codex")" == "${old_exe}" ]] &&
+    NPM_VIEW_FAIL=1 run_update codex 1.1.0 --follow-host >/dev/null &&
+    [[ ! -s "${CALL_LOG}" ]]; then pass; else fail "retained release cache miss"; fi
+
+echo "case: matching verified version works offline and a failed change preserves the release"
+: >"${CALL_LOG}"
+if NPM_VIEW_FAIL=1 run_update codex 1.1.0 --follow-host >/dev/null && [[ ! -s "${CALL_LOG}" ]] &&
+    ! NO_SIGNATURES=1 MOCK_VERSION=1.4.0 run_update codex 1.4.0 --follow-host >/dev/null 2>&1 &&
+    [[ "$(cat "${ROOT_DIR}/current/VERSION")" == 1.1.0 ]]; then pass; else fail "follow-host offline or verification fallback"; fi
+
+echo "case: explicit pin wins over follow-host and unpin resumes following"
+if MOCK_VERSION=1.2.3 run_update codex 1.2.3 >/dev/null &&
+    NPM_VIEW_FAIL=1 run_update codex 1.4.0 --follow-host >/dev/null &&
+    [[ "$(cat "${ROOT_DIR}/current/VERSION")" == 1.2.3 && "$(cat "${ROOT_DIR}/PIN")" == 1.2.3 ]] &&
+    run_agent_cli unpin codex >/dev/null &&
+    MOCK_VERSION=1.4.0 run_update codex 1.4.0 --follow-host >/dev/null &&
+    [[ "$(cat "${ROOT_DIR}/current/VERSION")" == 1.4.0 && ! -e "${ROOT_DIR}/PIN" ]]; then pass; else fail "pin precedence or unpin transition"; fi
+
+echo "case: concurrent follow-host launches install once"
+new_case follow-concurrent
+run_update codex 1.2.3 --follow-host >/dev/null &
+first_follow=$!
+run_update codex 1.2.3 --follow-host >/dev/null &
+second_follow=$!
+if wait "${first_follow}" && wait "${second_follow}" && [[ "$(grep -c '^install ' "${CALL_LOG}")" == 1 ]]; then pass; else fail "concurrent follow-host installation"; fi
+
+echo "case: follow-host verifies the staged executable's reported version"
+if ! HEALTH_VERSION='codex-cli 1.2.4' MOCK_VERSION=1.3.0 run_update codex 1.3.0 --follow-host >/dev/null 2>&1 &&
+    [[ "$(cat "${ROOT_DIR}/current/VERSION")" == 1.2.3 ]] &&
+    HEALTH_VERSION='codex-cli 1.3.0' MOCK_VERSION=1.3.0 run_update codex 1.3.0 --follow-host >/dev/null; then pass; else fail "follow-host runtime version mismatch"; fi
 
 echo "case: signatures and lockfile integrity are mandatory"
 new_case signatures

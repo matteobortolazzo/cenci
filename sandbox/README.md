@@ -240,12 +240,11 @@ lifecycle must be stopped and relaunched before attachment.
 repo's — including pinning or downgrading via `--version`. Every repository and named
 instance on the host resolves the same `current` symlink.
 
-**Interim pin behavior:** `--version` now writes a persistent pin to the shared volume, and
-a subsequent bare `update-agent` (no `--version`) refuses rather than silently reinstalling
-`latest`. Until an `--unpin` flag lands, the only way to clear the pin is running
-`agent-cli.sh unpin <agent>` directly inside the updater container.
+`--version` writes a persistent pin. A bare `update-agent` reports the pin.
+Run `cenci sandbox update-agent --agent <agent> --unpin` to clear it and
+resume the configured update policy.
 
-**Version-retention race:** only the current and previous releases are kept on disk. An
+**Managed updates** keep only the current and previous releases on disk. An
 already-running sandbox holds its agent CLI open from the release directory it started
 with, so two `update-agent` calls in a row (while that session is still running) can prune
 the release out from under it — the version currently executing is neither "current" nor
@@ -1084,12 +1083,47 @@ older base, print a notice, and rebuild it automatically on the next run.
 
 ### Update an agent CLI
 
-Workload mounts are read-only, so native Claude Code, Codex, and OpenCode update checks are
-suppressed. Update the host-global agent volume explicitly:
+By default, the sandbox manages its own Linux client. To follow a host client,
+add a per-agent version policy to `.config/cenci/config.json` in your OS account's
+home directory. Use absolute paths appropriate to your installation.
+
+```json
+{
+  "sandboxHostProfiles": {
+    "claude": {"version": {"mode": "follow-host", "executable": "/home/alice/.local/bin/claude"}},
+    "codex": {"version": {"mode": "follow-host", "executable": "/usr/local/bin/codex"}}
+  }
+}
+```
+
+Version selection applies across repositories for each runtime's shared store.
+An alternate `XDG_CONFIG_HOME` can select other preferences. The OS account's
+config file controls host program execution. The configured path must resolve
+to a trusted native executable or the standard Codex npm platform installation.
+Personal script wrappers and executables inside repositories are unsupported.
+Before probing, cenci checks writable sandbox mounts on available runtimes.
+A failed runtime check uses the same recovery path as a failed version probe.
+
+After a host upgrade or downgrade, `cenci open` checks the host version before
+starting a new agent, including inside a reused container. A matching
+installation starts immediately. Otherwise the credential-free updater
+verifies and activates the matching Linux release or reuses a previously
+verified matching release. Follow-host retains those releases for active
+processes and later rollbacks. A subsequent managed update that installs a new
+release can prune older releases. Explicit pins take precedence.
+
+If the host probe or download fails, launch warns and uses the existing verified
+release. An empty store fails with a recovery message. Check the configured
+path, Linux package availability and registry access, then launch again.
+`cenci audit` reports the policy and can read the version from a running
+sandbox. `cenci diagnose` can also inspect an existing stopped sandbox's
+store. Omit `version` or select `{"mode":"managed"}` to resume managed updates.
+
+To update or pin the host-global agent volume explicitly:
 
 ```bash
-cenci sandbox update-agent                                  # Claude, official latest
-cenci sandbox update-agent --agent codex                    # Codex, official latest
+cenci sandbox update-agent                                  # refresh Claude under its configured policy
+cenci sandbox update-agent --agent codex                    # refresh Codex under its configured policy
 cenci sandbox update-agent --agent codex --version 1.2.3    # exact rollback/rollout
 cenci sandbox update-agent --agent opencode                 # OpenCode, official latest
 ```
@@ -1097,7 +1131,8 @@ cenci sandbox update-agent --agent opencode                 # OpenCode, official
 `--version` accepts only an exact semantic version; ranges and tags are rejected. The command
 uses the same isolated verification and atomic activation path as bootstrap. It is global:
 new and existing sessions in every repository see the activated version through their shared
-read-only mount. Updating the cenci binary or rebuilding an image does not update either CLI.
+read-only mount. The normal `cenci update` installer also refreshes existing
+unpinned stores through `cenci sandbox update-agent --all` using each agent's policy.
 
 ### Update sandbox plugins
 

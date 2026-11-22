@@ -27,6 +27,9 @@ import (
 // writeFleetConfig, whose t.Setenv overrides this for the one test
 // (watch/docs/test-isolation.md, "Ambient config-dir isolation").
 func TestMain(m *testing.M) {
+	if versionProbeTestChild() {
+		return
+	}
 	dir, err := os.MkdirTemp("", "cenci-launcher-xdg-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "launcher tests: creating the pinned XDG_CONFIG_HOME: %v\n", err)
@@ -37,6 +40,7 @@ func TestMain(m *testing.M) {
 		_ = os.RemoveAll(dir)
 		os.Exit(1)
 	}
+	versionAccountHomeOverride = dir
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

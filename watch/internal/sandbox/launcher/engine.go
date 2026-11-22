@@ -597,6 +597,15 @@ func (e *Engine) UpdateAgent(agent, version string) error {
 	if err := ValidateActiveAgent(agent); err != nil {
 		return err
 	}
+	if version == "" {
+		if handled, err := e.followHostIfConfigured(agent, false, false); handled {
+			return err
+		}
+	}
+	return e.updateManagedAgent(agent, version)
+}
+
+func (e *Engine) updateManagedAgent(agent, version string) error {
 	if err := e.EnsureMonolithImage(); err != nil {
 		return err
 	}
@@ -806,6 +815,12 @@ func (e *Engine) refreshStaleAgentVolumeIfNeeded(agent string, status agentVolum
 // Launch's hoisted containerRunning probe (see launch.go) so the staleness
 // branch can skip entirely on the attach path.
 func (e *Engine) EnsureAgentVolume(agent string, containerRunning bool) error {
+	if err := ValidateActiveAgent(agent); err != nil {
+		return err
+	}
+	if handled, err := e.followHostIfConfigured(agent, true, true); handled {
+		return err
+	}
 	name := AgentCLIVolumeName(agent)
 	exists, err := e.volumeExists(name)
 	if err != nil {
@@ -821,7 +836,7 @@ func (e *Engine) EnsureAgentVolume(agent string, containerRunning bool) error {
 			return nil
 		}
 	}
-	if err := e.UpdateAgent(agent, ""); err != nil {
+	if err := e.updateManagedAgent(agent, ""); err != nil {
 		// The mount created (or left behind) an empty/broken volume. Remove it
 		// so the next launch retries bootstrap instead of mistaking a failed
 		// install for an existing CLI. A failed removal here leaves the volume

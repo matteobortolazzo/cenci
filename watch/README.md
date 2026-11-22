@@ -3644,7 +3644,15 @@ build`/`docker run` in tests) is affected. On Linux, an unregistered
 there it is a fixable setup gap. See
 [the failure atlas](../docs/failure-atlas.md#cenci-sandbox-dind-002).
 
-Beyond the explicit `update-agent` verb, every `cenci open` launch also
+Claude and Codex can follow their host version across repositories with
+`sandboxHostProfiles.<agent>.version.mode` set to `follow-host` and an absolute
+`version.executable` in the OS account's cenci config. Each new agent process
+checks the host version, including attaches to a running container. Bare updates,
+`--all` and the installer refresh honor the same policy, and `--unpin` resumes
+it. A failed match leaves the verified release available. See the setup example
+and failure behavior in the [sandbox update guide](../sandbox/README.md#update-an-agent-cli).
+
+Under the default managed policy, every `cenci open` launch also
 best-effort refreshes an already-populated shared agent-CLI volume when it is
 stale: the default TTL is 24h (override with
 `CENCI_SANDBOX_AGENT_CLI_TTL_HOURS=<hours>`; `0` disables auto-refresh

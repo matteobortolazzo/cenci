@@ -285,6 +285,7 @@ type BoundaryWeakening struct {
 // only names, sources, and mount/staging status (see EnvVarName/
 // ForwardedEnvVar/CredentialSource's doc comments).
 type Posture struct {
+	AgentVersion *AgentVersionPosture `json:"agentVersion,omitempty"`
 	// Basis is the running/planned discriminator (ticket #627): see the
 	// PostureBasis* consts. Always exactly "running" or "planned" — never
 	// omitted, never a third value.
@@ -368,7 +369,7 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 
 // auditWithSecrets is Audit's body, classifying and reporting secrets against
 // the caller-supplied resolved set.
-func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, error) {
+func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (result Posture, auditErr error) {
 	agent := opts.Agent
 	if agent == "" {
 		agent = "claude"
@@ -415,6 +416,23 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 	profile, err := resolveHostProfile(agent, scope, home)
 	if err != nil {
 		return Posture{}, err
+	}
+	version, err := profile.versionPolicy()
+	if err != nil {
+		return Posture{}, err
+	}
+	// Report the effective version only after we know whether this is a
+	// running workload or a planned launch. Failed audits have no posture.
+	if version.Mode != "" {
+		defer func() {
+			if auditErr == nil {
+				name := ""
+				if result.Basis == PostureBasisRunning {
+					name = scope.ContainerName
+				}
+				result.AgentVersion = e.describeHostVersion(agent, name, version, false)
+			}
+		}()
 	}
 	if err := profile.rejectWritableOverlaps(addDirs); err != nil {
 		return Posture{}, err
@@ -1015,6 +1033,7 @@ func (p Posture) WriteText(w io.Writer) error {
 	}
 
 	_, _ = fmt.Fprintf(bw, "Image: %s (%s)\n", p.Image.Reference, p.Image.Type)
+	p.AgentVersion.writeText(bw)
 	_, _ = fmt.Fprintf(bw, "Workspace: %s -> %s\n", p.Workspace.HostPath, p.Workspace.ContainerPath)
 	_, _ = fmt.Fprintf(bw, "Network: %s (weakened=%t)\n", p.Network.Mode, p.Network.Weakened)
 	_, _ = fmt.Fprintf(bw, "Reseed creds: %t", p.ReseedCreds)
