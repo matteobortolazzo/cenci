@@ -9,6 +9,16 @@ model: sonnet
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion, mcp__context7__resolve-library-id, mcp__context7__query-docs
 ---
 
+> **Codex Plan-mode gate**: In Codex only (Claude Code ignores this block), evaluate this gate from this text alone, before any tool call and before the Client dispatch below. `<target>` is the ticket id, or the task slug in ticketless mode. When a refusal below applies, make no tool call (no read, no shell, no `require-runtime.sh`), print only that one line with no text before or after it (no skill-usage announcement, such as which skill you are using), and end the turn. Codex's own implement-the-plan turn right after a Plan-mode approval is a `persist`, never a planning request.
+>
+> 1. A planning request (neither `persist` nor `apply`) whose `<collaboration_mode>` is not Plan, or cannot be read: `cenci: $cenci:implement plans only in Plan mode — type /plan and resend: /plan $cenci:implement <target>`
+> 2. A `persist` (Codex's own implement-the-plan turn right after a Plan-mode approval counts as `persist`) in a session that holds no Plan-mode-approved plan for `implement <target>`: `cenci: no approved plan in this session — type /plan and resend: /plan $cenci:implement <target>`
+> 3. A `persist` or `apply` sent while Plan mode is still active: `leave Plan mode and resend`
+>
+> Refusals 2 and 3 can both apply to one `persist` sent while Plan mode is still active, and refusal 3 wins: check Plan mode before checking for an approved plan.
+>
+> Otherwise no refusal applies; continue to the Client dispatch: a planning request in Plan mode, and in Default mode a `persist` with a Plan-mode-approved plan in this session, and an `apply`. `codex-runtime`'s **Approved-plan handoff** stays the full statement of these checks.
+
 > **Client dispatch**: In Codex, read `codex-runtime` and `implement/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
 
 > **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`. This also governs the `phases/*.md` files this skill invokes.

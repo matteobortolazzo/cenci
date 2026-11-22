@@ -129,7 +129,7 @@ cenci run implement apply 42 --agent codex
 
 Each workflow uses its own target, artifact and `apply` command. Artifacts live under `.plans/` (gitignored, local to the checkout). Paths are stored repo-relative and resolved against the main checkout of the current environment, so host and sandbox behave the same.
 
-The Plan-mode self-check applies to the planning request only. `persist` and `apply` run in Default mode and are exempt from it; they have their own checks (sent while Plan mode is still active they are refused with `leave Plan mode and resend`, and `apply` stops when `checkpoint.mjs verify` fails).
+The Plan-mode self-check applies to the planning request only. `persist` and `apply` run in Default mode and are exempt from it; they have their own checks (sent while Plan mode is still active they are refused with `leave Plan mode and resend`, and `apply` stops when `checkpoint.mjs verify` fails). The self-check, the fresh-process `persist` refusal and the `leave Plan mode and resend` refusal all run from the planning skill's own dispatcher text (the Codex Plan-mode gate in its `SKILL.md`, ahead of the Client dispatch line) before any file is read, so a refusal prints only its line and makes no tool call.
 
 | Workflow | Target | Artifact | Apply command |
 |---|---|---|---|
