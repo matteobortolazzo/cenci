@@ -120,6 +120,26 @@ func TestHostVersionProbeEnvironmentAndLimits(t *testing.T) {
 	}
 }
 
+func TestHostVersionRefusesUntrustedSecondaryRuntime(t *testing.T) {
+	e, _, _ := volumeCheckEngine(t, 0, 0, 0)
+	versionProfileFixture(t, "claude", "2.1.3 (Claude Code)")
+	marker := filepath.Join(t.TempDir(), "ran")
+	fake := filepath.Join(os.Getenv("PATH"), "podman")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\n: > \""+marker+"\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	p, err := globalHostVersionPolicy("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.probe("claude", e); err == nil {
+		t.Fatal("unsafe peer runtime accepted")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("untrusted peer ran: %v", err)
+	}
+}
+
 func TestHostVersionProbeRejectsImpostors(t *testing.T) {
 	for _, mode := range []string{"checkout", "symlink into checkout", "hardlink", "unsafe wrapper", "ambient PATH", "writable"} {
 		t.Run(mode, func(t *testing.T) {

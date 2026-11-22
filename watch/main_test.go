@@ -20,7 +20,10 @@ func TestMain(m *testing.M) {
 	binaryPath = filepath.Join(tmp, "cenci")
 
 	// Build the binary from the current module root.
-	build := exec.Command("go", "build", "-o", binaryPath, ".")
+	// Host execution policy is anchored to the OS account, independently of
+	// fixture HOME/XDG overrides. Isolate that account for this test binary.
+	anchor := filepath.Join(tmp, "account")
+	build := exec.Command("go", "build", "-ldflags", "-X 'github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox/launcher.versionAccountHomeOverride="+anchor+"'", "-o", binaryPath, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		panic("failed to build binary: " + err.Error())

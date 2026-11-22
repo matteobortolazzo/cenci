@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 type hostVersionPolicy struct {
@@ -23,7 +25,14 @@ type hostVersionPolicy struct {
 	configPath string
 }
 
+// CLI integration binaries link this to their private fixture directory. The
+// shipped launcher takes its trust anchor solely from the OS account record.
+var versionAccountHomeOverride string
+
 var versionAccountHome = func() (string, error) {
+	if versionAccountHomeOverride != "" {
+		return versionAccountHomeOverride, nil
+	}
 	account, err := user.Current()
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve OS account home: %w", err)
@@ -135,13 +144,41 @@ func (p hostVersionPolicy) probe(agent string, e *Engine) (string, error) {
 	if e.Runtime == "" {
 		return "", errors.New("runtime unavailable to check host program exposure")
 	}
-	if err := e.checkWritableSandboxBinds(func(source, name string) error {
+	check := func(source, name string) error {
 		if identityContains(source, path) {
 			return fmt.Errorf("native host client %q is writable by %s", path, name)
 		}
 		return p.rejectWritableBind(source, name)
-	}); err != nil {
+	}
+	if err := e.checkWritableSandboxBinds(check); err != nil {
 		return "", err
+	}
+	// The CLI is host-wide. A writable bind on the other installed engine
+	// can change its bytes even when this store's own containers are clean.
+	runtimes, err := sandbox.AvailableRuntimes()
+	if err != nil {
+		return "", err
+	}
+	for _, other := range runtimes {
+		if other == e.Runtime {
+			continue
+		}
+		cli, err := exec.LookPath(other)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(cli) {
+			return "", fmt.Errorf("unsafe %s runtime path", other)
+		}
+		if err := checkHostVersionPath(cli); err != nil {
+			return "", err
+		}
+		if _, err := hostNativeClient(other, cli); err != nil {
+			return "", err
+		}
+		if err := e.WithRuntime(other).checkWritableSandboxBinds(check); err != nil {
+			return "", err
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

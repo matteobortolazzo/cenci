@@ -1101,6 +1101,8 @@ An alternate `XDG_CONFIG_HOME` can select other preferences. The OS account's
 config file controls host program execution. The configured path must resolve
 to a trusted native executable or the standard Codex npm platform installation.
 Personal script wrappers and executables inside repositories are unsupported.
+Before probing, cenci checks writable sandbox mounts on available runtimes.
+A failed runtime check uses the same recovery path as a failed version probe.
 
 After a host upgrade or downgrade, `cenci open` checks the host version before
 starting a new agent, including inside a reused container. A matching

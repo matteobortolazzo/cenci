@@ -40,6 +40,7 @@ func TestMain(m *testing.M) {
 		_ = os.RemoveAll(dir)
 		os.Exit(1)
 	}
+	versionAccountHomeOverride = dir
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
