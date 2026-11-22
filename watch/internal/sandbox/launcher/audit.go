@@ -103,6 +103,7 @@ const (
 	MountKindGhCreds        = "gh-creds"
 	MountKindAzureCreds     = "azure-creds"
 	MountKindAddedDir       = "added-dir"
+	MountKindHostContent    = "host-content"
 
 	// MountKindUnknown is an explicit sentinel for a mount destination that
 	// doesn't match any case in mountKindForDestination's switch — a visible
@@ -298,6 +299,8 @@ type Posture struct {
 	Dind      DindPosture      `json:"dind"`
 
 	Mounts             []MountPosture      `json:"mounts"`
+	HostContent        *HostContentPosture `json:"hostContent,omitempty"`
+	Preferences        *PreferencePosture  `json:"preferences,omitempty"`
 	Volumes            []VolumePosture     `json:"volumes"`
 	Env                []EnvVarName        `json:"env"`
 	ForwardedEnv       []ForwardedEnvVar   `json:"forwardedEnv"`
@@ -409,6 +412,13 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 	if err != nil {
 		return Posture{}, err
 	}
+	profile, err := resolveHostProfile(agent, scope, home)
+	if err != nil {
+		return Posture{}, err
+	}
+	if err := profile.rejectWritableOverlaps(addDirs); err != nil {
+		return Posture{}, err
+	}
 
 	cenciBin, socketDir, cenciAvailable := cenciWiringReadOnly()
 
@@ -426,6 +436,7 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 	allMountArgs = append(allMountArgs, mountArgs...)
 	allMountArgs = append(allMountArgs, credArgs...)
 	mounts := classifyMounts(allMountArgs)
+	mounts = append(mounts, profile.Mounts...)
 
 	// stagedKinds is the authoritative "is it actually staged" signal for
 	// credentialSources below: every credential MountKind that made it into
@@ -444,6 +455,12 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 	allEnvArgs = append(allEnvArgs, envArgs...)
 
 	planned := buildPlannedPosture(agent, scope, home, opts, dindOn, dindDegraded, mounts, allEnvArgs, featureArgs, stagedKinds, secrets)
+	if profile.preferences.Source != "" {
+		planned.Preferences = &profile.preferences.PreferencePosture
+	}
+	if len(profile.Mounts) > 0 {
+		planned.HostContent = &HostContentPosture{Configured: profile.Mounts, Status: "planned"}
+	}
 
 	// Observed-mode dispatch (ticket #627): only attempted when a runtime is
 	// resolved (e.Runtime != "") — a runtime-less Engine (NewForAudit) always
@@ -471,7 +488,7 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 		return planned, nil
 	}
 
-	observed, err := e.deriveObservedPosture(scope, agent, home, opts, planned)
+	observed, err := e.deriveObservedPosture(scope, agent, home, opts, planned, profile)
 	if err != nil {
 		// A malformed/unreadable inspect response on a genuinely running
 		// container must never be silently read as the permissive planned
@@ -479,6 +496,14 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 		// failure or basis:"running".
 		planned.InspectWarning = fmt.Sprintf("the running container's actual posture could not be verified (%v); showing the planned posture only, not the running container's actual state", err)
 		return planned, nil
+	}
+	if planned.Preferences != nil {
+		observed.Preferences = planned.Preferences
+		if observed.HostContent != nil && observed.HostContent.Status == "recreate" {
+			observed.Preferences.Status = "container requires recreation"
+		} else {
+			e.readPreferenceReport(scope.ContainerName, agent, observed.Preferences)
+		}
 	}
 	return observed, nil
 }
@@ -553,6 +578,9 @@ func classifyMounts(args []string) []MountPosture {
 // assembleVolumeMounts/validateCredentials ever emit — so classifyMounts
 // never has to guess.
 func mountKindForDestination(destination string) string {
+	if destination == hostContentRoot || strings.HasPrefix(destination, hostContentRoot+"/") {
+		return MountKindHostContent
+	}
 	// Azure is the one credential staged as a SET of files under a shared
 	// directory (assembleVolumeMounts loops over azureCredFiles), so it is
 	// matched by that directory prefix rather than by one exact destination
@@ -817,7 +845,8 @@ func boundaryWeakenings(featureArgs []string, mounts []MountPosture) []BoundaryW
 	if networkPosture(featureArgs).Weakened {
 		weakenings = append(weakenings, hostNetworkBoundaryWeakening())
 	}
-	return append(weakenings, addDirWeakenings(mounts)...)
+	weakenings = append(weakenings, addDirWeakenings(mounts)...)
+	return append(weakenings, hostContentWeakenings(mounts)...)
 }
 
 // hostNetworkBoundaryWeakening is the --host-network entry, shared by the
@@ -1006,6 +1035,8 @@ func (p Posture) WriteText(w io.Writer) error {
 		_, _ = fmt.Fprintf(bw, "  [%s] %s -> %s (%s)\n", m.Kind, m.Source, m.Destination, mode)
 	}
 
+	p.HostContent.writeText(bw)
+	p.Preferences.writeText(bw)
 	_, _ = fmt.Fprintln(bw, "\nVolumes:")
 	if len(p.Volumes) == 0 {
 		_, _ = fmt.Fprintln(bw, "  (none)")

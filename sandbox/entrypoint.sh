@@ -283,6 +283,14 @@ if [[ -L /home/dev/.claude ]]; then
 fi
 mkdir -p /home/dev/.claude
 
+# A recreated container can reuse a home with links from an earlier profile.
+# Clear stale managed entries, including on the first boot after opt-out.
+case "${CENCI_SANDBOX_AGENT:-claude}" in
+    claude|codex)
+        bash "${SCRIPT_DIR}/lib/host-content.sh" "${CENCI_SANDBOX_AGENT:-claude}" /home/dev || exit 1
+        ;;
+esac
+
 if [[ -L /home/dev/.claude/settings.json ]]; then
     rm -f /home/dev/.claude/settings.json
 fi

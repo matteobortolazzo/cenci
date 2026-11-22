@@ -222,7 +222,7 @@ func deriveObservedDind(obs observedInspect) DindPosture {
 // the combined inspect probe deliberately does not read back .Config.Env
 // (mirroring inspectReusePosture's "one combined inspect call" minimalism),
 // so it is not an observed fact of the running container either.
-func (e *Engine) deriveObservedPosture(scope Scope, agent, home string, opts Options, planned Posture) (Posture, error) {
+func (e *Engine) deriveObservedPosture(scope Scope, agent, home string, opts Options, planned Posture, profile hostProfile) (Posture, error) {
 	obs, err := e.inspectObservedPosture(scope.ContainerName)
 	if err != nil {
 		return Posture{}, err
@@ -263,6 +263,7 @@ func (e *Engine) deriveObservedPosture(scope Scope, agent, home string, opts Opt
 	// Each /repos/ mount of the running container is an --add-dir entry (#737),
 	// built by the same helper the planned posture uses.
 	weakenings = append(weakenings, addDirWeakenings(mounts)...)
+	weakenings = append(weakenings, hostContentWeakenings(mounts)...)
 	// The configured sandboxEnv.forward entries are per-exec state with no
 	// inspect source, so they are copied from planned like ForwardedEnv, which
 	// they describe (#1016).
@@ -289,6 +290,7 @@ func (e *Engine) deriveObservedPosture(scope Scope, agent, home string, opts Opt
 		Dind:      deriveObservedDind(obs),
 
 		Mounts:             mounts,
+		HostContent:        e.observedHostContent(scope, profile, mounts, observedReuseMounts(obs.Mounts)),
 		Volumes:            namedVolumes(mounts),
 		Env:                planned.Env,
 		ForwardedEnv:       planned.ForwardedEnv,

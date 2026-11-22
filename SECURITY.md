@@ -46,6 +46,14 @@ container, but the container is what stands between it and your host. See
 Off by default and must be explicitly requested: either per-launch, with a flag, or
 persistently, in your own user config:
 
+- **Personal skills and instructions**. A `sandboxHostProfiles` selection in
+  your user config lets the specified agent read selected host content in the
+  authorized repository's sandbox. Every file in a selected skill directory
+  crosses that boundary, including scripts and reference material. Select only
+  content you trust the agent to read and act on. The launcher uses read-only
+  bind mounts and checks the running container against the selection before
+  reuse. Review the configured and observed paths with `cenci audit`.
+  [Configuration and recovery](./sandbox/README.md#personal-skills-and-instructions).
 - **`--host-network`** — switches the container to host networking, needed for OAuth
   flows that require a browser callback to `localhost`. The container joins a *shared*
   host network namespace instead of its own isolated bridge namespace: it loses network
