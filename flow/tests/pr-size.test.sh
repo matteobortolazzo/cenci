@@ -96,5 +96,131 @@ assert_eq "${rc}" "2" "case7 bad base ref exits 2"
 bash "${SCRIPT}" "${R}" main --ticket Q >/dev/null 2>"${T}/err"; rc=$?
 assert_eq "${rc}" "2" "case7b invalid --ticket letter exits 2"
 
+# --- 8. Documented trivial plans, with real fenced context-bundle contents -------
+python3 - "${SCRIPT}" "${R}" "${T}" <<'PY' || fail "case8 trivial-plan compatibility"
+import pathlib
+import subprocess
+import sys
+
+script, repo, tmp = sys.argv[1:]
+# Full legacy Claude persistence shape: main-agent sections followed by the
+# context-gatherer's fenced ticket body. Approval, a one-line prose plan and
+# the original estimate are all required to enable compatibility.
+legacy = '''---
+version: 1
+mode: ticket
+ticketId: 42
+ticketTitle: "Fix a label"
+slug: fix-a-label
+isChild: false
+isLastChild: false
+parentId: null
+createdAt: 2026-11-22T10:30:00Z
+status: planned
+approval: trivial
+planCommitSha: abc123def
+stalenessPaths: flow/example.md
+---
+
+## User Context
+None
+
+## Q&A from Planning
+No questions asked
+
+## Implementation Plan
+Trivial ticket — implementation follows the ticket body directly; see ## Ticket Details.
+
+## Architectural Context
+N/A — no codebase exploration; triage judged the ticket unambiguous from its own body.
+
+## Attachment Summaries
+None
+
+## Ticket Details
+Fix a label
+````text
+## Description
+Correct the existing label in one file.
+### Size Estimate: M
+Bound: <= 30 changed files, <= 2,000 changed lines, one feature slice, at most one migration.
+Rationale: One label correction.
+### Acceptance Criteria
+- The existing label is corrected.
+```markdown
+## Implementation Plan
+### Size Estimate: L
+```
+````
+
+## Project Context
+Use existing patterns.
+'''
+marker = 'Trivial ticket — implementation follows the ticket body directly; see ## Ticket Details.'
+confirmed = '''### Size Estimate: M
+Bound: <= 30 changed files, <= 2,000 changed lines, one feature slice, at most one migration.
+Rationale: One label correction.
+'''
+smaller_confirmed = '''### Size Estimate: S
+Bound: <= 10 changed files, <= 400 changed lines, one concern in one project, no schema change, no automerge protected path.
+Rationale: The existing ticket requires one label correction.
+'''
+cases = [
+    ('legacy-trivial', legacy, 'M', 0),
+    ('paraphrased-legacy-S', legacy.replace(marker, 'See Ticket Details for implementation.')
+        .replace('### Size Estimate: M\nBound: <= 30 changed files, <= 2,000 changed lines, one feature slice, at most one migration.',
+                 '### Size Estimate: S\nBound: <= 10 changed files, <= 400 changed lines, one concern in one project, no schema change, no automerge protected path.'), 'S', 0),
+    ('new-trivial', legacy.replace(marker, marker + '\n\n' + confirmed), 'M', 0),
+    ('confirmed-takes-precedence', legacy.replace(marker, marker + '\n\n' + smaller_confirmed), 'S', 0),
+    ('regular-missing-confirmed', legacy.replace('approval: trivial', 'approval: pending-human')
+        .replace(marker, '### Summary\nImplement the ticket.'), 'unknown', 0),
+    ('empty-plan', legacy.replace(marker, ''), 'unknown', 0),
+    ('marker-alone', legacy.replace('approval: trivial', 'approval: pending-human'), 'unknown', 0),
+    ('duplicate-approval', legacy.replace('approval: trivial', 'approval: trivial\napproval: pending-human'), 'unknown', 0),
+    ('extra-plan-work', legacy.replace(marker, marker + '\n### Files to Modify\nflow/example.md'), 'unknown', 0),
+    ('malformed-confirmed', legacy.replace(marker, marker + '\n### Size Estimate: XL'), 'unknown', 0),
+    ('malformed-size-only', legacy.replace(marker, '### Size Estimate: XL'), 'unknown', 0),
+    ('empty-confirmed-size', legacy.replace(marker, '### Size Estimate:'), 'unknown', 0),
+    ('heading-only-plan', legacy.replace(marker, '# Implementation follows the ticket'), 'unknown', 0),
+    ('fenced-plan', legacy.replace(marker, '```text\nSee Ticket Details for implementation.\n```'), 'unknown', 0),
+    ('missing-original', legacy.replace('### Size Estimate: M\n', ''), 'unknown', 0),
+    ('invalid-original', legacy.replace('### Size Estimate: M\n', '### Size Estimate: XL\n'), 'unknown', 0),
+    ('fenced-approval', legacy.replace('approval: trivial\n', '').replace('Fix a label\n````text',
+        'Fix a label\n````text\napproval: trivial'), 'unknown', 0),
+    ('unaccepted-correction', legacy.replace(marker, marker + '\n### Size Estimate: L'), None, 2),
+    ('malformed-acceptance', legacy.replace(marker, marker + '\n### Size Acceptance\nOriginal size: M\nAccepted size: L'), None, 2),
+]
+for name, plan, ticket, expected_rc in cases:
+    path = pathlib.Path(tmp) / f'{name}.md'
+    path.write_text(plan)
+    result = subprocess.run(['bash', script, repo, 'main', '--plan', str(path)],
+                            capture_output=True, text=True)
+    assert result.returncode == expected_rc, (name, result)
+    if expected_rc:
+        assert not result.stdout and 'Size Acceptance' in result.stderr, (name, result)
+    else:
+        assert f'ticket={ticket} mismatch=' in result.stdout, (name, result)
+        assert 'accepted=false' in result.stdout, (name, result)
+        if ticket != 'unknown':
+            assert f'vs ticket {ticket}' in result.stdout, (name, result)
+            assert '**Size unverified**' not in result.stdout, (name, result)
+        if name == 'paraphrased-legacy-S':
+            assert 'original=S accepted=false' in result.stdout, (name, result)
+# Structural legacy recognition must not allow the explicit override to skip
+# original-M correction approval either.
+path = pathlib.Path(tmp) / 'legacy-trivial-override.md'
+path.write_text(legacy)
+result = subprocess.run(['bash', script, repo, 'main', '--plan', str(path), '--ticket', 'L'],
+                        capture_output=True, text=True)
+assert result.returncode == 2 and not result.stdout and 'Size Acceptance' in result.stderr, result
+# The Claude procedure must actually carry that estimate into the main-agent
+# section before appending the ticket bundle; the bundle alone is insufficient.
+phase = (pathlib.Path(script).parent.parent / 'phases/phase-1-plan.md').read_text()
+trivial = phase.split('## Trivial Fast Path\n', 1)[1].split('\n## Lean Approval Path', 1)[0]
+assert 'Follow it with the confirmed `### Size Estimate: <letter>` and its `Bound:` and `Rationale:` lines, copied verbatim from the ticket body in the existing context bundle.' in trivial
+assert 'if that estimate is missing, malformed or ambiguous, leave this branch for `## New Plan` before persisting or continuing.' in trivial
+print(f'trivial-plan fixtures: {len(cases)} passed')
+PY
+
 echo "pr-size.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

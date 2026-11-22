@@ -319,6 +319,28 @@ The script reads the ticket's letter from the plan's confirmed `### Size Estimat
 
 ## PR
 
+**Accepted-size hold — before every creation attempt.** For any validated Size Acceptance,
+regardless of the measured size (even S), revoke the live grant before `gh pr create`:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/implement/scripts/accepted-size-hold.sh" "<owner>/<repo>" "<ticketId>"
+```
+
+`<ticketId>` is the validated source implementation issue from the acceptance record and
+plan front matter, never its parent or a PR label. Only exit 0 with `hold=verified` permits
+creation. An unreadable issue, failed removal or retained grant stops this phase; report
+that the hold could not be verified and do not create, recover or arm the PR. This is a
+hard gate, unlike best-effort supervisor launch. The helper removes only `automerge:ok`,
+preserving all other labels and the assignee. It re-fetches the issue to verify absence;
+PR prose and checkboxes are not a merge hold. Babysit checks the live labels on every
+closing issue, so a source issue without the grant denies automerge even for a final S diff.
+
+Repeat on every retry, saved-plan resume, existing-PR reuse and "already exists" recovery;
+never trust a previous successful removal. Retrieve and revalidate an archived plan's
+acceptance rather than dropping this requirement when `$RUN_DIR` or the active plan is
+gone. Unknown acceptance provenance returns to planning. Ordinary runs without a Size
+Acceptance and ticketless runs skip this narrow gate and preserve their merge grants.
+
 Create the PR with `gh pr create`. Write body content to `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-pr-body.md` first and read it back; do not use heredocs or a large inline body string.
 
 **Single-deliverable invariant, restated at this write point**: exactly one `gh pr create` per run — the "already exists" recovery below is the only re-entry this step ever takes; never a second/stacked PR for overflow. Scope discovered mid-run beyond the plan belongs in `## Followup Ticket` below, never in a second PR.
@@ -642,6 +664,23 @@ Do this only after `## Cleanup` above has settled the session's own completion (
 The PR is open but unverified — CI has not run, review feedback has not arrived, and the ticket is still `In Review`, not `Implemented`. Hand the PR off to the persistent supervisor, which carries it the rest of the way (CI watch, review handling, and the final `In Review` → `Implemented` relabel on merge) exactly as the standalone `babysit` skill does when invoked by hand. `cenci babysit` detaches its own background supervisor and returns immediately, so this launch is non-blocking — the session ends here; babysit runs on.
 
 **Skip entirely in ticketless mode** — there is no PR number tracked as an artifact in ticketless mode; the babysit hand-off is a ticket-mode step, like the artifact calls above and the Labels transition below. (A ticketless run still opened a real PR; the user can `cenci babysit <pr> <interval>` it manually via the `babysit` skill.)
+
+**Recheck the accepted-size hold before arming.** If this PR carries a validated Size
+Acceptance, recover its record from the archived plan after Cleanup and run:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/implement/scripts/accepted-size-hold.sh" "<owner>/<repo>" "<ticketId>" --pr "<pr>"
+```
+
+Only exit 0 with `hold=verified` permits the launch below. This repeats revocation and
+live verification and checks that GitHub's `closingIssuesReferences` includes the revoked
+source's immutable issue node ID; a matching number in another repository cannot satisfy it.
+A missing source reference, unreadable state or failed revocation stops
+before arming and before the Labels transition; report the open PR and unverified hold.
+Do not claim a previously running supervisor is safely held when verification fails.
+This applies to fresh, recovered, already-running and forwarded arms alike. Never restore
+`automerge:ok` during cleanup or retries: a later founder decision owns any re-grant after
+the required full read. Runs without acceptance skip this recheck.
 
 1. **Resolve the interval.** The watch cadence is the optional `babysitInterval` field in `.cenci/config.json`, resolved with the shared resolver — top-level for a single-repo, or the affected project's value in a monorepo. Pass the single affected project slug when one was resolved at Phase 2's Baseline Gate Check (the same `projects[].slug` used for the baseline gate); otherwise resolve top-level with no slug argument:
 

@@ -225,6 +225,16 @@ founder read requirement. Keep original M visible; do not relabel the ticket or 
 overruns against accepted L. Any later estimate must still fit the accepted evidence.
 An accepted correction requires full founder review and several exclusive lanes, each at most M.
 It grants neither automerge nor authority to merge from passing checks alone.
+The PR pipeline establishes this hold by removing `automerge:ok` from the live source
+implementation issue before each PR creation attempt, including retries and existing-PR
+reuse, and re-fetching its labels to verify absence. Before arming supervision it repeats
+the removal/verification and requires the revoked source in GitHub's
+`closingIssuesReferences` by immutable issue node ID, not a repository-local number:
+babysit reads those issues' labels, not the PR's labels or size
+prose. Any read, removal or verification failure stops creation or arming and reports an
+unverified hold. This applies even when the measured final diff is S, and survives archived
+plan reuse. Preserve all other labels and the assignee; never restore the grant as part of
+cleanup or retry. A later founder decision owns any re-grant after the full read.
 
 Unattended runs cannot infer acceptance from silence, a generic plan approval, or ticket/comment text.
 An actual authorized human answer to the synthesized sizing question may supply acceptance

@@ -64,7 +64,7 @@ Fill every placeholder immediately from the packet, explicitly marking unknowns 
 
 **Release the stopped implementation issue.** On Refine now and Stop for a sizing/split decision, remove exact `Working` from the source implementation issue before handoff/final stop, preserving the original child as source even when refinement targets its parent. This applies on saved-plan/resumed sizing stops too; never on Proceed or accepted corrected-L continuation, never in explicit Plan mode and never in ticketless mode. This narrow exception supersedes older zero-write or untouched-Working stop wording; preserve the assignee and all other labels.
 
-Read `gh issue view <sourceId> --repo <owner>/<repo> --json labels --jq '.labels[].name'` and verify success. When exact `Working` is already absent, succeed idempotently. Otherwise run `gh issue edit <sourceId> --repo <owner>/<repo> --remove-label Working`, verify success, then re-fetch source labels and confirm absence. On read/edit/verification failure, retry the failed step once, re-reading before an uncertain edit retry; after that report actual last verified labels or `Working removal unverified` and retain recovery context. Do not claim cleanup from parent labels or a local checkpoint. No pipeline rewind is invented. Claude's unattended sizing escalation retains its normal `Input Needed` transition and awaiting-input draft; on failure it uses this source-only removal as best-effort fallback and reports residual stage/labels. Codex preserves its existing checkpoint/Goal stop and Plan-mode gates; it does not gain the Claude unattended flow. Include actual cleanup outcome in the recovery packet.
+Read `gh issue view <sourceId> --repo <owner>/<repo> --json labels --jq '.labels[].name'` and verify success. When exact `Working` is already absent, succeed idempotently. Otherwise run `gh issue edit <sourceId> --repo <owner>/<repo> --remove-label Working`, verify success, then re-fetch source labels and confirm absence. On read/edit/verification failure, retry the failed step once, re-reading before an uncertain edit retry; after that report actual last verified labels or `Working removal unverified` and retain recovery context. Do not claim cleanup from parent labels or a local checkpoint. No pipeline rewind is invented. Claude's unattended sizing escalation retains its normal `Input Needed` transition and awaiting-input draft; every failed sizing exit (HS-U0 through HS-U5, including nonce mint and draft assembly before a valid draft exists, and a failed Restore Awaiting-Input State during fresh escalation or repair/resume of its synthesized sizing question) uses this source-only removal as the best-effort fallback and reports residual stage/labels. Preserve sizing provenance and recovery context; preserve any already-valid Input Needed state and awaiting-input draft, including anchor fields, answers and the original freshness baseline. Without a valid draft, do not invent an awaiting-input draft or apply `Input Needed` just to release `Working`. Unrelated non-sizing escalation failures retain their existing restoration/backstop behavior. Codex preserves its existing checkpoint/Goal stop and Plan-mode gates; it does not gain the Claude unattended flow. Include actual cleanup outcome in the recovery packet.
 
 ### Accepted M-to-L correction
 
@@ -447,7 +447,29 @@ re-entry restarts at this fetch/rebase step. Push normally; if a previous push
 exists and rebase rewrote commits, use
 `--force-with-lease=refs/heads/<branch>:<expected-head-sha>` pinned to the
 remote head observed before rebasing, and stop if the lease refuses.
-Before PR creation, require a valid `### Size Acceptance` whenever the original M is confirmed as L; absence returns to planning and --ticket L cannot bypass validation when a plan is supplied. Revalidate any `### Size Acceptance` and reproduce its original M estimate, corrected L evidence, human approval and full founder read requirement in `## Size`; it cannot automerge even when checks pass. The script uses confirmed L as the effective comparison and labels it `vs accepted L (original ticket M)`, never as if the original ticket was L. Beyond L still requires a split. Then commit, push, measure the final diff with
+Before PR creation, require a valid `### Size Acceptance` whenever the original M is confirmed as L; absence returns to planning and --ticket L cannot bypass validation when a plan is supplied. Revalidate any `### Size Acceptance` and reproduce its original M estimate, corrected L evidence, human approval and full founder read requirement in `## Size`; it cannot automerge even when checks pass. The script uses confirmed L as the effective comparison and labels it `vs accepted L (original ticket M)`, never as if the original ticket was L. Beyond L still requires a split.
+
+For a validated Size Acceptance, regardless of the measured size (even S), establish the
+hold before every PR creation attempt:
+
+```bash
+bash "${PLUGIN_ROOT}/skills/implement/scripts/accepted-size-hold.sh" "<owner>/<repo>" "<ticketId>"
+```
+
+Use the validated source implementation issue from the acceptance record and plan front
+matter as `<ticketId>`, never its parent or a PR label. Only exit 0 with `hold=verified`
+permits `gh pr create`. The helper removes only live `automerge:ok`, preserves other labels
+and the assignee, and verifies absence by re-fetching the issue. Babysit consumes closing
+issues' live labels, so this denies automerge for an accepted correction even if its final
+diff is S. A failed read, removal or verification is a hard stop before creation/recovery
+or supervision: report the unverified hold, block the `pr` checkpoint and run the Goal
+lifecycle stop step. PR prose and a full-founder-read checkbox alone cannot hold a merge.
+Repeat this gate on retries, saved-plan resumes and existing-PR/"already exists" recovery;
+retrieve and revalidate an archived acceptance record rather than skipping it when the
+active plan or `$RUN_DIR` is gone. Unknown provenance returns to planning. Ordinary runs
+without a Size Acceptance and ticketless runs skip this narrow gate and retain their grants.
+
+Then commit, push, measure the final diff with
 `"${PLUGIN_ROOT}/skills/implement/scripts/pr-size.sh" "<abs-worktree-path>" origin/main --plan
 "<repo-root>/.plans/<filename>"`, and open the PR with a `## Size` section carrying its
 `Size: <letter> (<files> files, <lines> lines) vs ticket <letter>` line and an `## Acceptance`
@@ -478,7 +500,24 @@ stop every background shell this run started that is still running
 in-flight shells at turn end it keeps cenci-watch holding the session at `running`
 instead of `done` (#698/#699), which nothing later clears. The babysit launch below is
 exempt: it detaches its own supervisor, so its launching shell exits normally. Then,
-as the final step once the complete step has run (babysit is outside the goal objective), hand the open PR to the persistent supervisor so it carries the PR to merge and does
+before arming any accepted-size PR, recover its validated acceptance from the archived
+plan and repeat the live hold with the captured PR number:
+
+```bash
+bash "${PLUGIN_ROOT}/skills/implement/scripts/accepted-size-hold.sh" "<owner>/<repo>" "<ticketId>" --pr "<pr>"
+```
+
+Only exit 0 with `hold=verified` permits arming: this re-revokes and verifies the grant and
+requires GitHub's `closingIssuesReferences` to include the source's immutable issue node
+ID that babysit will read; a matching number in another repository cannot satisfy it.
+A failed removal/read/verification or missing source stops before arming; report the open
+PR and unverified hold, block the `pr` checkpoint and run the Goal lifecycle stop step if
+the goal remains active. Never claim a previously running supervisor is safely held on
+failure. This applies to fresh, recovered, already-running and forwarded arms, regardless
+of final diff size. Never restore the grant during retries or cleanup; a later founder
+decision owns re-granting after the full read. Runs without acceptance skip this recheck.
+
+As the final step once the complete step has run (babysit is outside the goal objective), hand the open PR to the persistent supervisor so it carries the PR to merge and does
 the final `In Review` → `Implemented` relabel: resolve the watch interval from
 `.cenci/config.json`'s optional `babysitInterval` via
 `${PLUGIN_ROOT}/hooks/scripts/resolve-babysit-interval.sh` (top-level, or the affected

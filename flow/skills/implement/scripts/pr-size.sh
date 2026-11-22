@@ -10,7 +10,9 @@
 # lockfiles included (a binary file counts as one changed file and zero lines).
 # The ticket's letter comes from --ticket, else from the first
 # `### Size Estimate: <letter>` in Implementation Plan, else `unknown`.
-# Legacy plans without that section retain first-heading compatibility.
+# Legacy plans without that section retain first-heading compatibility. The
+# approval: trivial legacy one-line prose plan also inherits its original ticket
+# estimate; other plans with no confirmed estimate remain unknown.
 # Size Acceptance is a root-validated approval record, not authorization this
 # measurement script can grant. Its structural fields are checked fail-closed.
 #
@@ -49,19 +51,33 @@ if [[ -n "${PLAN}" ]]; then
     function size_letter(line) {
       sub(/^### Size Estimate: */, "", line); sub(/[ \t]*$/, "", line); return line
     }
+    NR == 1 && $0 == "---" { frontmatter = 1; next }
+    frontmatter {
+      if ($0 == "---") frontmatter = 0
+      else if (/^approval:/) { approvals++; if ($0 == "approval: trivial") trivial_approval++ }
+      next
+    }
+    section == "## Implementation Plan" && !/^## / && /[^ \t]/ {
+      plan_lines++
+      if ($0 ~ /^[ \t]*(#|```|~~~)/) nonprose_plan = 1
+    }
     /^[ \t]*(```|~~~)/ {
       delimiter = $0; sub(/^[ \t]*/, "", delimiter)
       char = substr(delimiter, 1, 1); run = 0
       while (substr(delimiter, run + 1, 1) == char) run++
       if (!fence) { fence = 1; fence_char = char; fence_length = run }
-      else if (char == fence_char && run >= fence_length && substr(delimiter, run + 1) ~ /^[ \t]*$/) fence = 0
+      else if (char == fence_char && run >= fence_length && substr(delimiter, run + 1) ~ /^[ \t]*$/) { fence = 0; inner_fence = 0 }
+      else if (section == "## Ticket Details") {
+        if (!inner_fence) { inner_fence = 1; inner_char = char; inner_length = run }
+        else if (char == inner_char && run >= inner_length && substr(delimiter, run + 1) ~ /^[ \t]*$/) inner_fence = 0
+      }
       next
     }
-    fence && section == "## Ticket Details" && /^### Size Estimate: *[SML][ \t]*$/ {
+    fence && !inner_fence && section == "## Ticket Details" && /^### Size Estimate: *[SML][ \t]*$/ {
       if (!original) original = size_letter($0)
     }
     fence { next }
-    /^## / { section = $0; if ($0 == "## Implementation Plan") has_plan = 1; acceptance = 0 }
+    /^## / { section = $0; if ($0 == "## Implementation Plan") has_plan++; acceptance = 0 }
     /^### / { acceptance = (section == "## Implementation Plan" && $0 == "### Size Acceptance"); if (acceptance) has_acceptance++ }
     /^### Size Estimate: *[SML][ \t]*$/ {
       letter = size_letter($0)
@@ -78,6 +94,7 @@ if [[ -n "${PLAN}" ]]; then
     acceptance && /^Review:/ { review++; if ($0 != "Review: full founder read; no automerge") bad = 1 }
     END {
       size = has_plan ? confirmed : legacy
+      if (!size && has_plan == 1 && approvals == 1 && trivial_approval == 1 && plan_lines == 1 && !nonprose_plan && !has_acceptance) size = original
       valid = !bad && has_acceptance == 1 && old_m == 1 && new_l == 1 && review == 1 && fields["Target"] && fields["Scope"] && fields["Supported estimate"] && fields["Lanes"] && fields["Reason to retain one PR"] && fields["Human approval"] && size == "L" && original == "M"
       if (has_acceptance && !valid) exit 2
       if (original == "M" && size == "L" && !valid) exit 2
