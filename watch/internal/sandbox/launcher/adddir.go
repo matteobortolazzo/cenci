@@ -888,6 +888,17 @@ func containerVanished(err error) bool {
 // path, and a concurrent launch that just created it makes the create fail on
 // the name clash anyway.
 func (e *Engine) scanOtherSandboxes(addDirs []addDirMount) error {
+	return e.checkWritableSandboxBinds(func(source, name string) error {
+		for _, d := range addDirs {
+			if strictlyInsideBind(d.Host, source) {
+				return refuseInsideOtherSandbox(d.Host, source, name)
+			}
+		}
+		return nil
+	})
+}
+
+func (e *Engine) checkWritableSandboxBinds(check func(source, name string) error) error {
 	names, err := sandbox.RunningContainerNames(context.Background(), e.Runtime)
 	if err != nil {
 		return fmt.Errorf("%s: %w", otherSandboxScanFailure, err)
@@ -907,11 +918,9 @@ func (e *Engine) scanOtherSandboxes(addDirs []addDirMount) error {
 		if err := requireBindSourcesOnHost(name, posture.Mounts); err != nil {
 			return err
 		}
-		for _, d := range addDirs {
-			for _, source := range sources {
-				if strictlyInsideBind(d.Host, source) {
-					return refuseInsideOtherSandbox(d.Host, source, name)
-				}
+		for _, source := range sources {
+			if err := check(source, name); err != nil {
+				return err
 			}
 		}
 	}

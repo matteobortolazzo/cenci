@@ -219,6 +219,7 @@ func DefaultModel(agent string) string {
 // resolution/preflight can never drift between a real launch and its dry-run
 // preview.
 type launchCtx struct {
+	Profile hostProfile
 	Agent   string
 	Model   string
 	Home    string
@@ -339,6 +340,13 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 	if err != nil {
 		return launchCtx{}, err
 	}
+	profile, err := resolveHostProfile(agent, scope, home)
+	if err != nil {
+		return launchCtx{}, err
+	}
+	if err := profile.rejectWritableOverlaps(addDirs); err != nil {
+		return launchCtx{}, err
+	}
 
 	if e.Runtime == "" {
 		if dindOn {
@@ -357,6 +365,7 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 	}
 
 	ctx := launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, AzureOn: azureOn, Plugins: plugins, Limits: limits, Secrets: secrets, AddDirs: addDirs}
+	ctx.Profile = profile
 	e.warnUnsetForwardNames(ctx)
 	e.warnAttendedConfigUnreadable()
 	return ctx, nil
@@ -440,6 +449,10 @@ func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir stri
 	}
 	attachArgv = buildAgentExecArgv(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
 
+	if err := e.checkProfileWriters(ctx.Profile); err != nil {
+		return nil, nil, false, err
+	}
+
 	running, err := e.containerRunning(ctx.Scope.ContainerName)
 	if err != nil {
 		return nil, nil, false, err
@@ -478,6 +491,9 @@ func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir stri
 		if !sameAddDirSet(ctx.AddDirs, posture.Mounts) {
 			return nil, nil, false, fmt.Errorf("running container '%s' was created with a different --add-dir set; run 'cenci sandbox stop %s', then relaunch", ctx.Scope.ContainerName, ctx.Scope.ContainerName)
 		}
+		if err := e.checkHostContentReuse(ctx, posture.Mounts); err != nil {
+			return nil, nil, false, err
+		}
 
 		e.warnLimitsDrift(ctx)
 		return nil, attachArgv, true, nil
@@ -490,6 +506,7 @@ func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir stri
 	if err != nil {
 		return nil, nil, false, err
 	}
+	limitArgs = append(limitArgs, ctx.Profile.createArgs(e.Runtime)...)
 	createArgv, err = e.buildRunArgv(ctx.Agent, cenciBin, socketDir, cenciAvailable, ctx.Scope, opts, ctx.Home, ctx.DindOn, ctx.AzureOn, ctx.Plugins, ctx.AddDirs, limitArgs)
 	if err != nil {
 		return nil, nil, false, err
@@ -584,6 +601,9 @@ func (e *Engine) Launch(opts Options) error {
 			}
 		}
 		e.warnDockerdStartupFailure(ctx)
+		if err := e.activateHostContent(ctx); err != nil {
+			return err
+		}
 		if ctx.Agent == "codex" && !opts.Shell {
 			// An immediate resume must not race the daemon's asynchronous
 			// reap. Finish this container's cleanup before starting Codex;
@@ -621,6 +641,18 @@ func (e *Engine) Launch(opts Options) error {
 			return err
 		}
 	}
+	if len(ctx.Profile.Mounts) > 0 {
+		again, err := resolveHostProfile(ctx.Agent, ctx.Scope, ctx.Home)
+		if err != nil {
+			return err
+		}
+		if again.ContentIdentity != ctx.Profile.ContentIdentity {
+			return fmt.Errorf("host content changed before container creation; relaunch to use the current selection")
+		}
+		if err := e.checkProfileWriters(again); err != nil {
+			return err
+		}
+	}
 
 	// Start the shared container detached, then exec this agent into it: PID 1
 	// stays independent from every tmux pane, so closing the first pane can't
@@ -644,6 +676,9 @@ func (e *Engine) Launch(opts Options) error {
 		return err
 	}
 	e.warnDockerdStartupFailure(ctx)
+	if err := e.activateHostContent(ctx); err != nil {
+		return err
+	}
 	execEnvArgs = append(execEnvArgs, e.tagLaunchPane(ctx.Scope.ContainerName)...)
 	return e.runAgent(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
 }

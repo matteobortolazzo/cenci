@@ -394,6 +394,63 @@ Both agents get a status line out of the box:
   `/home/dev/.codex/config.toml`. An existing `[tui]` table or `status_line` key is left
   untouched; tweak it with Codex's `/statusline` command.
 
+### Personal skills and instructions
+
+To use a personal Claude Code or Codex skill in a sandbox, select its directory
+in your host cenci configuration at `$XDG_CONFIG_HOME/cenci/config.json`
+(default `~/.config/cenci/config.json`). Each selection applies to one agent
+and an explicit list of repository roots. Use absolute canonical paths. For
+example, this configuration shares one skill and one personal instruction file
+with each client in the same repository.
+
+```json
+{
+  "sandboxHostProfiles": {
+    "claude": {
+      "repositories": ["/home/alex/code/example"],
+      "content": {
+        "skillDirectories": ["/home/alex/.claude/skills/review"],
+        "instructionFile": "/home/alex/.claude/CLAUDE.md"
+      }
+    },
+    "codex": {
+      "repositories": ["/home/alex/code/example"],
+      "content": {
+        "skillDirectories": ["/home/alex/.agents/skills/review"],
+        "instructionFile": "/home/alex/.codex/AGENTS.md"
+      }
+    }
+  }
+}
+```
+
+Select each skill by its directory containing `SKILL.md`. Every file under
+that directory becomes readable in the container. For Codex, use the absolute
+path to your personal `AGENTS.md` or `AGENTS.override.md` when you use a custom
+Codex home. Claude accepts `CLAUDE.md`. Use local files owned by you or root,
+under your home and outside a Git checkout, with write access limited to their
+owner. Within skills, a relative symlink can point to a regular file within
+the selected directory. The launcher rejects hard-linked files, broken or
+escaping links, special files, and ambiguous mount delimiters in paths. The
+launcher stages the selected sources read-only under `/opt/cenci-host-content`
+and makes them available through the client's personal discovery paths. Project
+instructions keep their usual scope. If a sandbox-local personal skill or
+instruction already occupies a selected name, choose a different skill name or
+move the conflicting file in the sandbox home before opening the agent.
+
+Edit a skill on the host and open another agent session to use the change.
+Adding or removing selected sources, replacing an entire skill directory, or
+atomically replacing the selected instruction file can require recreating the
+container. Check `cenci audit --agent claude` or `cenci audit --agent codex` for
+the configured paths, observed mounts, and whether recreation is required.
+Stop the scoped container and run `cenci open` again when prompted. The
+per-scope home volume retains local content and session history.
+
+Remove the host selection to disable sharing. A repository can also opt out
+with `{"sandbox":{"hostProfile":false}}` in its `.cenci/config.json`. On the
+next activation cenci cleans up its discovery links. A repository can never
+grant access to a host source.
+
 ### Codex auth
 
 When launching Codex (`--agent codex` / `cn xt`), auth is staged from the host:

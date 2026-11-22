@@ -59,7 +59,9 @@ func (p Posture) WriteExplanation(w io.Writer) error {
 	_, _ = fmt.Fprintln(bw)
 
 	_, _ = fmt.Fprintln(bw, "Workspace and home:")
-	if hasMountKind(p.Mounts, MountKindAddedDir) {
+	if hasMountKind(p.Mounts, MountKindHostContent) {
+		_, _ = fmt.Fprintf(bw, "The workspace at %s and the personal content listed below are available inside the container. The sandbox uses its own home volume.\n", p.Workspace.ContainerPath)
+	} else if hasMountKind(p.Mounts, MountKindAddedDir) {
 		// #737: with --add-dir the repo is no longer the only bind-mounted host
 		// directory; say so rather than claim it is.
 		_, _ = fmt.Fprintf(bw, "The current repo (%s) is bind-mounted into the container at %s, together\n", p.Workspace.HostPath, p.Workspace.ContainerPath)
@@ -107,6 +109,7 @@ func (p Posture) WriteExplanation(w io.Writer) error {
 
 	_, _ = fmt.Fprintln(bw, "Other mounts:")
 	writeOtherMountsExplanation(bw, p.Mounts)
+	p.HostContent.writeText(bw)
 	_, _ = fmt.Fprintln(bw)
 
 	_, _ = fmt.Fprintln(bw, "Credential sources:")
