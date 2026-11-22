@@ -63,6 +63,13 @@ for source in "${sources[@]}"; do
     destinations+=("$dest")
 done
 
+if [[ -d $stage/skills ]]; then
+    helper_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+    skill_roots=("$skills")
+    if [[ $agent == codex ]]; then skill_roots+=("$home/.codex/skills"); fi
+    perl "$helper_dir/host-skill-names.pl" "$stage" "${skill_roots[@]}"
+fi
+
 # Never traverse a user-replaced directory symlink when cleaning an old home.
 if [[ -d $skills && ! -L $skills && ! -L ${skills%/*} ]]; then
     for dest in "$skills"/*; do
