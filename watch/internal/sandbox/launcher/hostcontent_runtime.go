@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,11 @@ func (e *Engine) hostContentIdentity(name string) (string, error) {
 }
 
 func (e *Engine) checkHostContentReuse(ctx launchCtx, mounts []reuseMount) error {
+	if ctx.Profile.Authorized {
+		if err := checkHostProfileWorkspace(ctx.Scope, mounts); err != nil {
+			return err
+		}
+	}
 	hasContent := false
 	for _, m := range mounts {
 		if mountKindForDestination(m.Destination) == MountKindHostContent {
@@ -99,6 +105,27 @@ func (e *Engine) checkHostContentReuse(ctx launchCtx, mounts []reuseMount) error
 		return recreate
 	}
 	return nil
+}
+
+// A container name is derived from the repository basename. It cannot
+// establish which of two like-named checkouts the user authorized.
+func checkHostProfileWorkspace(scope Scope, mounts []reuseMount) error {
+	var source string
+	var count int
+	for _, m := range mounts {
+		if m.Destination == workspaceContainer {
+			source = m.Source
+			count++
+		}
+	}
+	if count == 1 && filepath.IsAbs(source) {
+		expected, err := os.Stat(scope.RepoRoot)
+		actual, actualErr := os.Stat(source)
+		if err == nil && actualErr == nil && os.SameFile(expected, actual) {
+			return nil
+		}
+	}
+	return fmt.Errorf("running container %q workspace %q does not match the authorized repository %q; run 'cenci sandbox stop %s', then relaunch", scope.ContainerName, source, scope.RepoRoot, scope.ContainerName)
 }
 
 func (e *Engine) activateHostContent(ctx launchCtx) error {

@@ -290,7 +290,7 @@ func (e *Engine) deriveObservedPosture(scope Scope, agent, home string, opts Opt
 		Dind:      deriveObservedDind(obs),
 
 		Mounts:             mounts,
-		HostContent:        e.observedHostContent(scope.ContainerName, profile, mounts),
+		HostContent:        e.observedHostContent(scope, profile, mounts, observedReuseMounts(obs.Mounts)),
 		Volumes:            namedVolumes(mounts),
 		Env:                planned.Env,
 		ForwardedEnv:       planned.ForwardedEnv,
