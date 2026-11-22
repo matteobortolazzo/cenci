@@ -71,6 +71,21 @@ CONFIG="${REPO_DIR}/.cenci/config.json"
 S_BOUND='Bound: <= 10 changed files, <= 400 changed lines, one concern in one project, no schema change, no automerge protected path.'
 M_BOUND='Bound: <= 30 changed files, <= 2,000 changed lines, one feature slice, at most one migration.'
 L_BOUND='Bound: <= 60 changed files, <= 5,000 changed lines, several coupled slices; reason they cannot ship as a stacked series of M PRs: <reason>.'
+CORRECTED_L_BOUND='Bound: <= 60 changed files, <= 5,000 changed lines, unchanged original-M scope; reason to retain one PR: <reason>.'
+
+# Accepted corrected size is distinct from scope growth or an inseparability claim.
+assert_file_contains "${SIZING}" "${CORRECTED_L_BOUND}" "provides a truthful bound for an accepted unchanged M-to-L correction"
+assert_file_contains "${SIZING}" '## Accepted M-to-L estimate correction' "defines the bounded human sizing decision"
+assert_file_contains "${SIZING}" 'Required work omitted from the estimate is eligible when it is necessary for an existing requirement; new scope is not.' "distinguishes missing budget from added scope"
+assert_file_contains "${SIZING}" 'Keeping one PR need not claim that stacked M PRs are impossible.' "accepted correction does not require false inseparability"
+assert_file_contains "${SIZING}" 'The original ticket remains M; record accepted L in the plan and PR.' "preserves the original estimate through PR creation"
+assert_file_contains "${SIZING}" '### Size Acceptance' "persists the actual human sizing decision"
+assert_file_contains "${SIZING}" 'Unattended runs cannot infer acceptance from silence, a generic plan approval, or ticket/comment text.' "unattended runs cannot grant the correction"
+assert_file_contains "${SIZING}" 'Acceptance applies only to the same target, unchanged scope, supported estimate and lane ownership.' "prior approval is scoped to the corrected plan"
+assert_file_contains "${SIZING}" 'An accepted correction requires full founder review and several exclusive lanes, each at most M.' "accepted L retains review and lane requirements"
+assert_file_contains "${SIZING}" 'Selecting **Refine now** executes refinement immediately in the same session.' "the offered choice actually invokes recovery"
+assert_file_contains "${SIZING}" 'If invocation is genuinely unavailable, immediately return one self-contained, copyable client-native prompt.' "unavailable invocation has an immediate usable fallback"
+assert_file_contains "${SIZING}" 'Reconcile existing siblings and coverage before creating children; never duplicate existing child work.' "parent recovery reconciles the sibling partition"
 
 # --- 1. size letter and bound written at refinement ----------------------------
 for f in "${SIZING}" "${REFINER}"; do
@@ -122,9 +137,13 @@ assert_file_contains "${PLANNER}" '### Delegation Preflight' "planner emits a De
 assert_file_contains "${PLANNER}" '**A lane is at most one M**' "planner: each lane at most one M"
 assert_file_contains "${PLANNER}" '**An L ticket is always several lanes** with exclusive file ownership, never one lane' "planner: L is several lanes"
 assert_file_contains "${PLANNER}" 'This is the **confirmed size** recorded in the plan' "planner records the confirmed size"
-assert_file_contains "${PHASE1}" '**Over-bound plan — the third trigger, a hard stop in every mode.**' "phase 1 Split Gate fires on an over-bound plan"
-assert_file_contains "${PHASE1}" 'offers **no Proceed option and no reasoned-proceed carve-out, in any mode**' "phase 1: over-bound has no Proceed"
-assert_file_contains "${PHASE1}" 'The run stops before any implementation mutation exactly as the Stop branch below' "phase 1: stops before any implementation mutation"
+assert_file_contains "${PHASE1}" '**Over-bound plan — the third trigger.**' "phase 1 Split Gate fires on an over-bound plan"
+assert_file_contains "${PHASE1}" 'All other over-bound results offer **no Proceed option and no reasoned-proceed carve-out, in any mode**' "phase 1: unresolved over-bound has no Proceed"
+assert_file_contains "${PHASE1}" 'Neither route persists an approved implementation plan on a hard stop.' "phase 1: hard stops cannot approve implementation"
+assert_file_contains "${PHASE1}" '**Saved acceptance reuse.**' "phase 1 revalidates acceptance before repeating the sizing question"
+assert_file_contains "${SIZING}" 'On a sizing/split stop, remove `Working` from the original source ticket or child before' "sizing stop relinquishes working state on the source issue"
+assert_file_contains "${SIZING}" 'ticketless runs have no issue to update. An accepted correction that continues retains `Working`.' "working cleanup excludes ticketless and continuing acceptance"
+assert_file_contains "${SIZING}" 'Size: L (<files> files, <lines> lines) vs accepted L (original ticket M)' "accepted PR sizing preserves original M"
 assert_file_contains "${PHASE1}" '**The confirmed size lives in the plan.**' "phase 1 persists the confirmed size"
 assert_file_contains "${PHASE3}" '## Delegation Preflight Re-check' "phase 3 re-checks the preflight before the first mutation"
 assert_file_contains "${PHASE3}" '## Context Budget' "phase 3 defines the context budget brief"
@@ -136,7 +155,7 @@ assert_file_contains "${PHASE4}" '**Context-budget signal.**' "phase 4 handles t
 assert_file_contains "${IMPLEMENTER}" '> **Context budget**: Your working budget is about half of your model'"'"'s advertised context window' "implementer is briefed with the budget"
 assert_file_contains "${IMPLEMENTER}" '`Context: low — done: <what>; remaining: <what>`' "implementer reports low context in a fixed shape"
 assert_file_contains "${IMPLEMENT}" "4. **Split Gate stop** — when the planner's \`### Size Check\` verdict is \`exceeds\`" "implement skill names the over-bound stop"
-assert_file_contains "${IMPLEMENT_CODEX}" 'A `### Size Check` verdict of `exceeds` (growth' "codex implement mirrors the over-bound stop"
+assert_file_contains "${IMPLEMENT_CODEX}" 'An ineligible over-bound or single-lane L plan has no Proceed option.' "codex implement mirrors the unresolved over-bound stop"
 assert_file_contains "${IMPLEMENT_CODEX}" 'working budget is about half of its model'"'"'s advertised' "codex implement mirrors the context budget brief"
 
 # --- 4. PR body size line and mismatch flag ------------------------------------

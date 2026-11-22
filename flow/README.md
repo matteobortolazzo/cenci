@@ -15,7 +15,7 @@ scope and planning decisions human-gated.
    work that exceeds L as a coverage exercise, and surface risks before implementation starts.
 2. **Save the plan.** Planning produces a durable `.plans/` handoff that can be reviewed,
    resumed, or picked up by automatic dispatch — after checking the plan still fits the
-   ticket's size bound (growth is a split trigger) and inventorying its delegation lanes.
+   ticket's size evidence, resolving eligible human-accepted M-to-L corrections, and inventorying its delegation lanes.
 3. **Run the engineering loop.** cenci creates an isolated worktree, proves the tests red,
    implements them green (every lane briefed with a context budget of about half its model's
    window), refactors, grades the result against the ticket item by item (the acceptance
@@ -163,7 +163,7 @@ companion) for every skill, including the internal ones not listed above.
 | `duplication-analyzer` | Analyzes codebase for duplicated code patterns, copy-paste code, and extraction opportunities. Use from the /cenci:refactor skill's Phase 3 parallel analysis when checking for repeated logic across files. | — |
 | `implementer` | Senior developer that implements features using TDD — writes tests first, then implementation. Use from the /cenci:implement skill's Phases 3–5 and review fix rounds for writing code, tests, and making builds pass. | configure,implement |
 | `lessons-collector` | Reviews implementation sessions and routes genuine mistakes into the repository's own lesson system, or into the existing owner doc that owns the subject, for future prevention. Use after implementation only when something actually went wrong. | implement |
-| `planner` | Senior architect that analyzes tickets and produces implementation plans. Use from the /cenci:implement skill's Phase 1 when planning feature work, analyzing ticket requirements, or breaking down complex tasks. | configure,implement |
+| `planner` | Senior architect that analyzes tickets and produces implementation plans. Use from the /cenci:implement skill's Phase 1 when planning feature work, analyzing ticket requirements, or breaking down complex tasks. | configure,implement refine |
 | `portability-maintainer` | Audits client-portability consistency (Claude Code, Codex, OpenCode) for maintenance drift, producing Client mismatch findings with proposed repairs. Use from the /cenci:maintain skill's clients and all modes. | maintain |
 | `refiner` | Senior tech lead that analyzes tickets during backlog refinement — finds ambiguity, drafts clarifying questions, and produces the refined ticket proposal (scope, acceptance criteria, sizing, splits). Use from the refine skill's Q&A relay loop. | refine |
 | `rules-maintainer` | Audits the repo's rule sources (CLAUDE.md/AGENTS.md Critical Rules, topic-doc rule bullets, and legacy lessons-learned files) for curation drift, producing findings with proposed repairs. Use from the /cenci:maintain skill's rules and all modes. | maintain |
@@ -188,13 +188,13 @@ companion) for every skill, including the internal ones not listed above.
 | `codex-runtime` | — | address-review, babysit, babysit-attention, ci-repair, configure, implement, maintain, project-core, refactor, refine, sync | — | — |
 | `configure` | codex.md, phases/autonomy-settings.md, phases/ci-dockerfile.md, phases/commit-pr.md, phases/detection-and-delta.md, phases/fleet-enrollment.md, phases/guidance-settings.md, phases/lazyboards.md, phases/mcp-lsp-ui-questions.md, phases/project-questions.md, phases/runtime-ci-sandbox-questions.md, phases/write-config.md, references/config-schema.md, references/lazyboards-example.md, references/migrations.md, references/settings-template.md | babysit, codex-runtime, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh, resolve-delta.sh | acceptance-reviewer, code-reviewer, context-gatherer, domain-specialist, implementer, planner, structure-analyzer |
 | `frontend-classification` | — | implement, refine | — | — |
-| `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md, timing.md | attachments, babysit, ci-repair, close, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | doc-conventions.sh, docs-policy.sh, pr-size.sh, run-artifact-dir.sh | acceptance-reviewer, code-reviewer, context-gatherer, domain-specialist, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
+| `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md, timing.md | attachments, babysit, ci-repair, close, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | accepted-size-hold.sh, doc-conventions.sh, docs-policy.sh, pr-size.sh, run-artifact-dir.sh | acceptance-reviewer, code-reviewer, context-gatherer, domain-specialist, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
 | `maintain` | base-freshness.md, codex.md, finding-schema.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, domain-specialist, portability-maintainer, rules-maintainer, structure-maintainer |
 | `merge-repair` | — | project-core, shell-rules, worktrees | — | — |
 | `pr-comment-filter` | — | address-review, babysit | — | — |
 | `project-core` | — | — | — | — |
 | `refactor` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | domain-specialist |
-| `refine` | codex.md, parent-blockers.md | attachments, close, codex-runtime, frontend-classification, project-core, shell-rules, subagent-safety, ticket-ownership | coverage-map.sh, ensure-issue.sh, resolve-policy.sh | context-gatherer, domain-specialist, refiner |
+| `refine` | codex.md, parent-blockers.md | attachments, close, codex-runtime, frontend-classification, project-core, shell-rules, subagent-safety, ticket-ownership | coverage-map.sh, ensure-issue.sh, resolve-policy.sh | context-gatherer, domain-specialist, planner, refiner |
 | `review` | codex.md | close, codex-runtime, project-core, shell-rules, subagent-safety | acceptance-verdict.sh | acceptance-reviewer, code-reviewer, domain-specialist |
 | `shell-rules` | — | implement | — | — |
 | `stack-angular` | — | testing | — | — |
@@ -403,7 +403,7 @@ Lessons go to the repository's own lesson system when it has one, and otherwise 
 
 When you run `/cenci:implement <ticket-id>`, the pipeline executes these phases:
 
-1. **Plan** — Context-gatherer agent bundles the ticket, design, and project context into a file (only a short digest enters the main context); planner agent reads the bundle, analyzes the codebase, and asks clarifying questions where your answers would change the plan; it then compares its Files to Modify against the ticket's `### Size Estimate: <letter>` bound (`### Size Check`) — a plan that exceeds the bound stops before any implementation mutation and returns a split proposal, in every mode — records the confirmed size, and inventories the `### Delegation Preflight` lanes (each at most one M; an L ticket is always several lanes). Once no questions remain, the plan is saved directly — no approval prompt — and presented for you to review before launching implementation. **Trivial-ticket fast path**: a narrowly-scoped, unambiguous, non-UI/non-security/auth/payment/migration ticket that is fully specified by its own body skips the planner and Q&A entirely and proceeds straight into implementation in the same session — it still passes through the `Planned` label milestone with a minimal plan file on disk.
+1. **Plan** — Context-gatherer agent bundles the ticket, design, and project context into a file (only a short digest enters the main context); planner agent reads the bundle, analyzes the codebase, and asks clarifying questions where your answers would change the plan; it then compares Files to Modify and sizing evidence against the ticket's `### Size Estimate: <letter>` (`### Size Check`). An unchanged original-M estimate correction within L may be explicitly accepted by a human with a reason to keep one PR; required work omitted from the estimate is eligible, new scope is not. Other over-bound plans stop before implementation and return a split proposal. The plan records the confirmed size and any `### Size Acceptance`, preserves the original estimate, and inventories `### Delegation Preflight` lanes (each at most one M; L always several exclusive lanes and full founder review). Once no questions remain, the plan is saved directly — no generic approval prompt — and presented for review before implementation. **Trivial-ticket fast path**: a narrowly-scoped, unambiguous, non-UI/non-security/auth/payment/migration ticket that is fully specified by its own body skips the planner and Q&A entirely and proceeds straight into implementation in the same session — it still passes through the `Planned` label milestone with a minimal plan file on disk.
 2. **Worktree Setup** — Creates an isolated git worktree for the feature branch
 3. **Test First (Red)** — Implementer agent writes failing tests
 4. **Implement (Green)** — Implementer agent makes tests pass; UI tickets also get visual verification, with final screenshots persisted for the PR in `en-US` and `it-IT` (screens and gallery). Every implementer lane is briefed that its working budget is about half its model's advertised context window with autocompact disabled; a lane reporting low context, or needing a second resume, stops the run as a split signal — it is never retried with a longer lane
@@ -688,14 +688,31 @@ After restarting Claude Code, Bash commands are rewritten through RTK automatica
 
 ## Ticket sizes
 
+Before writing implementation tickets, an independent planner inventories minimum work,
+including registration/guard paths, generated assets, tests and docs. Refinement reconciles
+unique paths and supported upper estimates and re-cuts infeasible partitions in the same pass.
 Refinement records shared sizing evidence for the whole change and for every proposed
 child: affected files, estimated changed lines, tests/docs, shape and uncertainty.
 Planning compares against that evidence before escalating a size disagreement, separating
 omitted required work from estimate corrections and unrequested expansion. Legacy tickets
-get their missing evidence reconstructed during planning. A genuine over-bound plan still
-stops, but **Refine now** carries the evidence and settled answers into refinement in the
-same session; stopping instead returns the prepared recovery packet. No prompt extraction,
-session clearing, or repeated already-refined confirmation is required for that handoff.
+get their missing evidence reconstructed during planning. A human may explicitly accept an
+unchanged original-M correction within L, including previously unbudgeted required work, with
+a one-PR rationale rather than an inseparability claim. Keep original M visible and accepted L
+and `### Size Acceptance` in the plan and PR, with full founder review and several exclusive
+M-bounded lanes. Unattended runs cannot infer approval; prior approval must match target, scope,
+supported estimate and ownership. Over-L work, incomplete evidence and uncovered requirements
+still stop. Selecting **Refine now** immediately runs refinement in the same session, carrying
+child/parent, target, sibling partition/coverage, dependencies, evidence and Q&A. A split child
+targets its parent; reconcile siblings before creating children. Normal ownership, confirmation
+and split-depth gates remain. If invocation is genuinely unavailable, return one self-contained,
+copyable client-native prompt immediately with the target and complete sanitized packet.
+On sizing/split stops, remove `Working` from the original ticket/child before stopping or
+handing off, preserving assignees and unrelated labels; unattended stops use `Input Needed`.
+Explicit client Plan mode skips forbidden issue writes and reports pending cleanup; ticketless
+runs have no issue to update. Accepted-and-continuing work retains `Working`.
+Accepted corrections use `Size: L (<files> files, <lines> lines) vs accepted L (original ticket M)`
+in the PR, with the acceptance record and explicit full founder read requirement; green checks
+alone do not grant merge authority.
 See [Sizing evidence and reconciliation](docs/ticket-sizing.md#sizing-evidence-and-reconciliation).
 
 Every refined ticket carries `### Size Estimate: <letter>` with the letter's bound line and a rationale — the contract in [`docs/ticket-sizing.md`](docs/ticket-sizing.md), mirrored from the Velka workflow docs:
@@ -704,9 +721,9 @@ Every refined ticket carries `### Size Estimate: <letter>` with the letter's bou
 |---|---|---|
 | **S** | `<= 10 changed files, <= 400 changed lines`, one concern in one project, no schema change, no automerge protected path | Bot review; automergeable |
 | **M** (default) | `<= 30 changed files, <= 2,000 changed lines`, one feature slice, API plus UI allowed, at most one migration | Bot review plus founder skim |
-| **L** | `<= 60 changed files, <= 5,000 changed lines`, several coupled slices — only with a recorded reason why they cannot ship as a stacked series of M PRs | Bot review plus full founder read |
+| **L** | `<= 60 changed files, <= 5,000 changed lines`, several coupled slices with a recorded stacked-M rationale, or an explicitly accepted unchanged original-M correction above | Bot review plus full founder read |
 
-Lines are insertions plus deletions, generated files and lockfiles included. Anything beyond L is split, never written as one ticket; model capability is never a reason to size up; the automerge gate stays at the S bound (`maxChangedFiles` 10 / `maxDiffLines` 400). The size is enforced four times: `/cenci:refine` writes it (and rejects vague acceptance criteria — every criterion names an observable behavior, state or output, and edge cases are listed individually); the planner's `### Size Check` stops an over-bound plan before any implementation mutation; every implementation lane is at most one M with a context budget of about half the model's window; and Phase 9 writes the measured `Size: … vs ticket …` line into the PR body, flagging a PR one size above its ticket.
+Lines are insertions plus deletions, generated files and lockfiles included. Anything beyond L is split, never written as one ticket; model capability is never a reason to size up; the automerge gate stays at the S bound (`maxChangedFiles` 10 / `maxDiffLines` 400). The size is enforced four times: `/cenci:refine` writes it (and rejects vague acceptance criteria — every criterion names an observable behavior, state or output, and edge cases are listed individually); the planner's `### Size Check` stops unresolved over-bound work before implementation, with only the explicitly accepted unchanged M-to-L correction defined above; every implementation lane is at most one M with a context budget of about half the model's window; and Phase 9 writes the measured `Size: … vs ticket …` line into the PR body, keeping mismatches visible and carrying accepted L and its human acceptance without granting merge authority from green checks alone.
 
 ## Ticket Splitting
 

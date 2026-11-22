@@ -313,9 +313,33 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/implement/scripts/pr-size.sh" "<worktree-path
 
 The script reads the ticket's letter from the plan's confirmed `### Size Estimate: <letter>` (pass `--ticket <letter>` instead when the plan was already archived or the letter is known another way; ticketless mode, which carries no size, reports `vs ticket unknown`). Its output is three things, consumed below: the machine line `files=… lines=… size=… ticket=… mismatch=none|above|below|beyond|unknown`, the PR-body line `Size: <letter> (<files> files, <lines> lines) vs ticket <letter>`, and — only on `above`, `beyond` or `unknown` — a flag line. Write the complete output to `$RUN_DIR/size.txt` (use the `Write` tool with the script's output; if `RUN_DIR` is unknown, keep the lines in hand for this entry only). A non-zero exit (the diff could not be measured) is reported in the PR body as `Size: unmeasured (<reason>) vs ticket <letter>` plus an unchecked checklist line — never as a pass.
 
-**A PR one size above its ticket is flagged, not fixed here.** On `mismatch=above` (or `beyond`): the flag line goes into the PR body's `## Size` section verbatim, the `## Checklist` carries `- [ ] Size: one above ticket — founder decision required before merge` (or `- [ ] Size: beyond L — must be split`), and the final session summary says so to the founder in its own line, naming the PR and the two letters. Such a PR **must not be merged on green checks alone**: it needs the founder's recorded decision (a re-size of the ticket through `/cenci:refine`, a recorded exception, or a split). The automerge gate is already at the S bound, so babysit never automerges it; the flag is what keeps a human merge honest too. `below` and `none` need no flag.
+**Accepted corrected size.** An original M with confirmed L requires a valid acceptance record; absence is a hard return-to-planning error, even if the final diff fits L. Supplying --ticket L cannot bypass this requirement when a plan is supplied. Before measuring, revalidate any `### Size Acceptance` against the current target, original scope, evidence, supported upper totals, lanes and actual human approval. An invalid record returns to planning; never silently compare it as accepted L. Preserve the original M estimate/evidence in the plan and reproduce the complete acceptance record (including approval provenance and one-PR reason) in the PR `## Size`, with `- [ ] Size: accepted corrected L — full founder read required before merge`. The measurement line reads `Size: <letter> (<files> files, <lines> lines) vs accepted L (original ticket M)`. A within-L diff uses the accepted L bound without requesting the same sizing decision again. It still needs a full founder read and cannot automerge; beyond L, scope expansion, lost coverage or an over-M lane remain hard stops. No automerge threshold changes. When the plan is archived, retrieve and validate its acceptance before using `--ticket L`; never erase original-M history through that override.
+
+**A PR one size above its ticket is flagged, not fixed here.** On `mismatch=above` (or `beyond`): the flag line goes into the PR body's `## Size` section verbatim, the `## Checklist` carries `- [ ] Size: one above ticket — founder decision required before merge` (or `- [ ] Size: beyond L — must be split`), and the final session summary says so to the founder in its own line, naming the PR and the two letters. Such a PR **must not be merged on green checks alone**: it needs the founder's recorded decision (a re-size of the ticket through `/cenci:refine`, a recorded exception, or a split). The automerge gate is already at the S bound, so babysit never automerges it; the flag is what keeps a human merge honest too. `below` and `none` need no mismatch flag; accepted corrected L retains its full-founder-read checklist and acceptance record above.
 
 ## PR
+
+**Accepted-size hold — before every creation attempt.** For any validated Size Acceptance,
+regardless of the measured size (even S), revoke the live grant before `gh pr create`:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/implement/scripts/accepted-size-hold.sh" "<owner>/<repo>" "<ticketId>"
+```
+
+`<ticketId>` is the validated source implementation issue from the acceptance record and
+plan front matter, never its parent or a PR label. Only exit 0 with `hold=verified` permits
+creation. An unreadable issue, failed removal or retained grant stops this phase; report
+that the hold could not be verified and do not create, recover or arm the PR. This is a
+hard gate, unlike best-effort supervisor launch. The helper removes only `automerge:ok`,
+preserving all other labels and the assignee. It re-fetches the issue to verify absence;
+PR prose and checkboxes are not a merge hold. Babysit checks the live labels on every
+closing issue, so a source issue without the grant denies automerge even for a final S diff.
+
+Repeat on every retry, saved-plan resume, existing-PR reuse and "already exists" recovery;
+never trust a previous successful removal. Retrieve and revalidate an archived plan's
+acceptance rather than dropping this requirement when `$RUN_DIR` or the active plan is
+gone. Unknown acceptance provenance returns to planning. Ordinary runs without a Size
+Acceptance and ticketless runs skip this narrow gate and preserve their merge grants.
 
 Create the PR with `gh pr create`. Write body content to `${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-pr-body.md` first and read it back; do not use heredocs or a large inline body string.
 
@@ -640,6 +664,23 @@ Do this only after `## Cleanup` above has settled the session's own completion (
 The PR is open but unverified — CI has not run, review feedback has not arrived, and the ticket is still `In Review`, not `Implemented`. Hand the PR off to the persistent supervisor, which carries it the rest of the way (CI watch, review handling, and the final `In Review` → `Implemented` relabel on merge) exactly as the standalone `babysit` skill does when invoked by hand. `cenci babysit` detaches its own background supervisor and returns immediately, so this launch is non-blocking — the session ends here; babysit runs on.
 
 **Skip entirely in ticketless mode** — there is no PR number tracked as an artifact in ticketless mode; the babysit hand-off is a ticket-mode step, like the artifact calls above and the Labels transition below. (A ticketless run still opened a real PR; the user can `cenci babysit <pr> <interval>` it manually via the `babysit` skill.)
+
+**Recheck the accepted-size hold before arming.** If this PR carries a validated Size
+Acceptance, recover its record from the archived plan after Cleanup and run:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/implement/scripts/accepted-size-hold.sh" "<owner>/<repo>" "<ticketId>" --pr "<pr>"
+```
+
+Only exit 0 with `hold=verified` permits the launch below. This repeats revocation and
+live verification and checks that GitHub's `closingIssuesReferences` includes the revoked
+source's immutable issue node ID; a matching number in another repository cannot satisfy it.
+A missing source reference, unreadable state or failed revocation stops
+before arming and before the Labels transition; report the open PR and unverified hold.
+Do not claim a previously running supervisor is safely held when verification fails.
+This applies to fresh, recovered, already-running and forwarded arms alike. Never restore
+`automerge:ok` during cleanup or retries: a later founder decision owns any re-grant after
+the required full read. Runs without acceptance skip this recheck.
 
 1. **Resolve the interval.** The watch cadence is the optional `babysitInterval` field in `.cenci/config.json`, resolved with the shared resolver — top-level for a single-repo, or the affected project's value in a monorepo. Pass the single affected project slug when one was resolved at Phase 2's Baseline Gate Check (the same `projects[].slug` used for the baseline gate); otherwise resolve top-level with no slug argument:
 

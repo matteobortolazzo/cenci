@@ -210,7 +210,7 @@ TRIGGER_MARKER='fires when the planner output contains a non-empty, non-"None" `
 STOP_OPTION_LABEL='**"Refine now — /cenci:refine `<id>` in this session (Recommended)"**'
 PROCEED_OPTION_LABEL='**"Proceed as a single PR anyway"**'
 STOP_PERSIST_NOTHING_MARKER='persist nothing, no `cenci pipeline` call of any kind'
-STOP_RETAIN_MARKER='leaves `Working` and the assignee claim in place'
+STOP_RETAIN_MARKER='remove `Working`, preserving the assignee and all other labels'
 LEAN_ROUTE_MARKER='route to `## Unattended Escalation Path` with the synthesized split question'
 PIN_AWAIT_INPUT_CMD='cenci pipeline await-input <id>'
 
@@ -220,7 +220,7 @@ CHILD_STOP_OPTION_LABEL='**"Refine now — parent #`<parentId>` via /cenci:refin
 NEVER_CHILD_REFINE_MARKER='Never tell the user to run `/cenci:refine <id>` against the child here'
 FEEDBACK_HEADING_MARKER='#### Feedback to the parent (split-child Stop branch and lean-ticket-mode escalation branch, new write)'
 FEEDBACK_TWO_CALL_SITES_MARKER='**Two call sites**: the interactive/ticketless split-child Stop branch above, and the lean-ticket-mode branch below'
-FEEDBACK_ONE_NEW_WRITE_MARKER='this is the one new write this ticket adds anywhere in the Split Gate, and it never runs for a non-child ticket'
+FEEDBACK_ONE_NEW_WRITE_MARKER='Parent feedback never runs for a non-child ticket; source-issue Working removal is separate'
 OVERSIZE_CHILD_MARKER='<!-- cenci-oversize-child -->'
 OVERSIZE_CHILD_BANNER_MARKER='oversize split-child evidence posted by `/cenci:implement` (planning — Split Gate)'
 FEEDBACK_VERIFY_MARKER='Verify by the created comment'\''s own identity — never by scanning the parent'\''s thread.'
@@ -256,15 +256,15 @@ if require_section ROUTE_SECTION "${PHASE1_CONTENT}" "## Route Planner Output" "
   assert_section_contains "${ROUTE_SECTION}" "${STOP_PERSIST_NOTHING_MARKER}" \
     "phase-1-plan.md (### Split Gate) Stop branch must persist nothing and make no cenci pipeline call of any kind"
   assert_section_contains "${ROUTE_SECTION}" "${STOP_RETAIN_MARKER}" \
-    "phase-1-plan.md (### Split Gate) Stop branch must leave Working and the assignee claim in place"
+    "phase-1-plan.md (### Split Gate) Stop branch must remove Working and preserve assignee/other labels"
   assert_section_contains "${ROUTE_SECTION}" "${LEAN_ROUTE_MARKER}" \
     "phase-1-plan.md (### Split Gate) lean-ticket branch must route to ## Unattended Escalation Path with the synthesized split question"
   assert_section_lacks "${ROUTE_SECTION}" "${PIN_AWAIT_INPUT_CMD}" \
     "phase-1-plan.md (## Route Planner Output) must NOT inline the await-input mechanics (they belong to ## Unattended Escalation Path only)"
 
-  RESUME_EXEMPTION_MARKER='the Split Gate does not apply on the resume-mode re-plan return'
+  RESUME_EXEMPTION_MARKER='resume-mode re-plans apply **Sizing decision on draft resume** before step 6'
   assert_section_contains "${ROUTE_SECTION}" "${RESUME_EXEMPTION_MARKER}" \
-    "phase-1-plan.md (## Route Planner Output, Resume-mode note) must state the Split Gate does not apply on the resume-mode re-plan return"
+    "phase-1-plan.md (## Route Planner Output, Resume-mode note) must validate resumed sizing decisions before persistence"
 
   # --- #1093 (PR 3/3): split-child-aware Stop option (parent-directed,
   #     never child-directed), the new parent-comment feedback write, its
@@ -278,7 +278,7 @@ if require_section ROUTE_SECTION "${PHASE1_CONTENT}" "## Route Planner Output" "
   assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_TWO_CALL_SITES_MARKER}" \
     "phase-1-plan.md (### Split Gate) must explicitly enumerate the two call sites for the parent-comment write"
   assert_section_contains "${ROUTE_SECTION}" "${FEEDBACK_ONE_NEW_WRITE_MARKER}" \
-    "phase-1-plan.md (### Split Gate) must state the parent-comment write is the one new write and never runs for a non-child ticket"
+    "phase-1-plan.md (### Split Gate) must separate parent-only feedback from source-issue Working removal"
   assert_section_contains "${ROUTE_SECTION}" "${OVERSIZE_CHILD_MARKER}" \
     "phase-1-plan.md (### Split Gate) must embed the <!-- cenci-oversize-child --> marker"
   assert_section_contains "${ROUTE_SECTION}" "${OVERSIZE_CHILD_BANNER_MARKER}" \
