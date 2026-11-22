@@ -502,6 +502,11 @@ source stops the launch before reconciliation. Correct the indicated file and
 reopen. If a sandbox built before this feature reports a missing helper, stop
 its container, rebuild the sandbox image and reopen it.
 
+Concurrent cenci opens serialize preference changes. Cenci checks for a
+concurrent client or editor save immediately before replacing the settings file.
+Other programs can still save between that check and the replacement. Finish
+manual edits to the sandbox settings before opening another session.
+
 `cenci audit --agent claude` or `cenci audit --agent codex` reports the source
 path and selected/skipped key names. When auditing a running container, imported
 and locally overridden keys describe its last recorded activation. An absent or
