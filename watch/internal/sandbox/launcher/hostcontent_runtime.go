@@ -32,6 +32,9 @@ func (p hostProfile) rejectWritableBind(source, name string) error {
 	// Check in both directions. A nested writable bind could expose one
 	// file in a read-only skill at a second, writable location.
 	paths := []string{p.configPath}
+	if p.preferences.Source != "" {
+		paths = append(paths, p.preferences.Source)
+	}
 	for _, m := range p.Mounts {
 		paths = append(paths, m.Source)
 	}
@@ -128,7 +131,10 @@ func checkHostProfileWorkspace(scope Scope, mounts []reuseMount) error {
 	return fmt.Errorf("running container %q workspace %q does not match the authorized repository %q; run 'cenci sandbox stop %s', then relaunch", scope.ContainerName, source, scope.RepoRoot, scope.ContainerName)
 }
 
-func (e *Engine) activateHostContent(ctx launchCtx) error {
+func (e *Engine) activateHostProfile(ctx launchCtx) error {
+	if err := e.activatePreferences(ctx); err != nil {
+		return err
+	}
 	if len(ctx.Profile.Mounts) == 0 {
 		return nil
 	}
