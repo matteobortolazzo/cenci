@@ -87,6 +87,15 @@ func resolveHostProfile(agent string, scope Scope, home string) (hostProfile, er
 		return hostProfile{}, fmt.Errorf("%s: sandboxHostProfiles.%s: %w", path, agent, err)
 	}
 	profile.configPath = path
+	policy, err := profile.versionPolicy()
+	if err != nil {
+		return hostProfile{}, err
+	}
+	if policy.Mode == "follow-host" && scope.WorkspaceBindHost != "" {
+		if err := policy.rejectWritableBind(scope.WorkspaceBindHost, "workspace"); err != nil {
+			return hostProfile{}, err
+		}
+	}
 	for _, repo := range profile.Repositories {
 		if !filepath.IsAbs(repo) || filepath.Clean(repo) != repo || !addDirPathIsPlain(repo) {
 			return hostProfile{}, fmt.Errorf("%s: invalid repository scope %q; use a canonical absolute repository root", path, repo)

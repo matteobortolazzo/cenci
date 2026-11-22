@@ -26,6 +26,15 @@ func (p hostProfile) createArgs(runtime string) []string {
 }
 
 func (p hostProfile) rejectWritableBind(source, name string) error {
+	policy, err := p.versionPolicy()
+	if err != nil {
+		return err
+	}
+	if policy.Mode == "follow-host" {
+		if err := policy.rejectWritableBind(source, name); err != nil {
+			return err
+		}
+	}
 	if !p.Authorized {
 		return nil
 	}

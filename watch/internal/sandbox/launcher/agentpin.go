@@ -50,6 +50,9 @@ func (e *Engine) UpdateAgentSkipIfPinned(agent string) error {
 	if err := ValidateActiveAgent(agent); err != nil {
 		return err
 	}
+	if handled, err := e.followHostIfConfigured(agent, false, true); handled {
+		return err
+	}
 	if err := e.EnsureMonolithImage(); err != nil {
 		return err
 	}
@@ -66,6 +69,9 @@ func (e *Engine) UpdateAgentSkipIfPinned(agent string) error {
 // pin/unpin contract), mirroring agentVolumePopulated's *exec.ExitError
 // classification pattern (engine.go).
 func IsAgentPinRefusal(err error) bool {
+	if errors.Is(err, errHostVolumePinned) {
+		return true
+	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		return exitErr.ExitCode() == 2
