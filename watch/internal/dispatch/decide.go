@@ -50,6 +50,17 @@ const (
 	reasonMainMissing  = "local main missing"
 )
 
+// Default-branch sync gated skip reasons (#1475), each distinct from every
+// reason above so a regression collapsing one status into another is caught by
+// a content-specific assertion (#446/#598). reasonMainFetchFailed is
+// retryable: the next pass fetches again.
+const (
+	reasonMainFetchFailed          = "default branch fetch failed (retryable)"
+	reasonMainNotDefault           = "local checkout not on the default branch"
+	reasonMainDirty                = "local default branch has conflicting local changes"
+	reasonMainDefaultBranchUnknown = "remote default branch unreadable"
+)
+
 // Repo-autonomy gate skip reasons (#851). reasonAutonomyUnknown is
 // deliberately distinct from every other reason below for the same reason
 // reasonMainSyncUnknown is distinct from reasonMainSyncFailed above: a
@@ -69,7 +80,7 @@ const (
 	// unrecognized enum value, it is the documented RepoAutonomyFetchUnconfirmed
 	// classification for "no remote-confirmed object this pass" (`git fetch
 	// origin` failed, the repo carries no syncs entry at all, or the remote
-	// main tip could not be confirmed, #903) -- explicitly retryable, since
+	// default-branch tip could not be confirmed, #903) -- explicitly retryable, since
 	// the very next pass may confirm a fetch.
 	reasonAutonomyFetchUnconfirmed = "remote main not fetched this pass (retryable)"
 	// reasonAutonomyAttended (#1086) is content-distinct from every reason
@@ -367,11 +378,11 @@ type Inputs struct {
 	//
 	// #877: every non-fetch-unconfirmed value here is remote-confirmed --
 	// probeRepoAutonomies only ever probes at a repo's confirmed AutonomyRef
-	// (mainSyncResult.AutonomyRef: the object ID of the remote's main tip,
+	// (mainSyncResult.AutonomyRef: the object ID of the remote default branch's tip,
 	// confirmed against `git ls-remote` this pass, #903), never a bare local
 	// ref that could be stale or unpushed. A repo whose fetch did not succeed
-	// this pass, whose remote main tip could not be confirmed (a deleted or
-	// renamed remote main, a stale tracking ref), or that carries no syncs
+	// this pass, whose remote default-branch tip could not be confirmed (a deleted or
+	// renamed remote default branch, a stale tracking ref), or that carries no syncs
 	// entry at all resolves RepoAutonomyFetchUnconfirmed -- the probe never
 	// ran, and the gate denies with its own explicitly retryable reason,
 	// distinct from every other denial.
@@ -507,13 +518,13 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRe
 		return Decision{Ticket: t, Action: ActionSkip, Reason: reason}
 	}
 
-	// Pickup rule 0: local main sync (#822). Evaluated first, before every
-	// other gate -- plan freshness (CommitsBehind) and the pipeline stage
-	// gate are both computed against the local tree, so nothing downstream
-	// in this chain is trustworthy when main failed to sync. A repo whose
-	// sync was never attempted or itself skipped (MainSyncSkipped, the zero
-	// value) or whose fetch merely failed transiently (MainSyncFetchFailed,
-	// self-heals next pass) is deliberately left ungated.
+	// Pickup rule 0: local default-branch sync (#822, #1475). Evaluated first,
+	// before every other gate -- plan freshness (CommitsBehind) and the
+	// pipeline stage gate are both computed against the local tree, so nothing
+	// downstream in this chain is trustworthy when the default branch failed
+	// to sync. A repo whose sync was never attempted or itself skipped
+	// (MainSyncSkipped, the zero value) is deliberately left ungated; a failed
+	// fetch (MainSyncFetchFailed, retryable next pass) is gated since #1475.
 	if reason, gated := mainSyncSkip(t); gated {
 		return skip(reason)
 	}
@@ -1115,15 +1126,26 @@ func stageGateSkip(t Ticket) (string, bool) {
 	}
 }
 
-// mainSyncSkip evaluates the local-main-sync gate (#822) for t. It returns
-// (reason, true) when t's repo failed to sync main and every ticket in that
-// repo must be skipped, and ("", false) when the gate passes -- including
-// MainSyncFetchFailed, which is deliberately left ungated since a transient
-// fetch failure self-heals next pass.
+// mainSyncSkip evaluates the local-default-branch-sync gate (#822, #1475) for
+// t. It returns (reason, true) when t's repo failed to sync its default branch
+// and every ticket in that repo must be skipped, and ("", false) when the gate
+// passes: only a synced repo, or one never synced at all (MainSyncSkipped, no
+// Dir configured). MainSyncFetchFailed is gated since #1475 (it was ungated
+// through #822/#851 because a transient failure self-heals): without a fetch
+// there is no remote-confirmed default branch to trust. The reason is
+// retryable, and the next pass fetches again.
 func mainSyncSkip(t Ticket) (string, bool) {
 	switch t.MainSync {
-	case MainSyncSkipped, MainSyncSynced, MainSyncFetchFailed:
+	case MainSyncSkipped, MainSyncSynced:
 		return "", false
+	case MainSyncFetchFailed:
+		return reasonMainFetchFailed, true
+	case MainSyncNotDefault:
+		return reasonMainNotDefault, true
+	case MainSyncDirty:
+		return reasonMainDirty, true
+	case MainSyncDefaultBranchUnreadable:
+		return reasonMainDefaultBranchUnknown, true
 	case MainSyncDiverged:
 		return reasonMainDiverged, true
 	case MainSyncFailed:

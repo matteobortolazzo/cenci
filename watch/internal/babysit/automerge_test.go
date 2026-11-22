@@ -395,12 +395,16 @@ func TestEvaluateAutomergeConditionMatrix(t *testing.T) {
 			in.MergeStateStatus = ""
 		}, reasonNotMergeable},
 		// #995: MergeStateStatus == "BEHIND" on a non-MERGEABLE PR maps to the
-		// distinct reasonBranchBehind -- not reachable from real GitHub state
-		// (BEHIND pairs with an otherwise-MERGEABLE PR, which bypasses this
-		// branch entirely, per the ticket's Decision), so only this pure case
-		// covers it.
+		// distinct reasonBranchBehind.
 		{"mergeable state BLOCKED with mergeStateStatus BEHIND maps to reasonBranchBehind", func(in *automergeInputs) {
 			in.Mergeable = "BLOCKED"
+			in.MergeStateStatus = "BEHIND"
+		}, reasonBranchBehind},
+		// #1475: BEHIND is how real GitHub reports a branch that must be updated,
+		// and it pairs with mergeable == MERGEABLE: that PR must hold too, or a
+		// green MERGEABLE/BEHIND PR would reach `gh pr merge`.
+		{"MERGEABLE with mergeStateStatus BEHIND holds reasonBranchBehind", func(in *automergeInputs) {
+			in.Mergeable = "MERGEABLE"
 			in.MergeStateStatus = "BEHIND"
 		}, reasonBranchBehind},
 		// #995 no-regression: Mergeable == "UNKNOWN" must still win outright,
@@ -490,6 +494,178 @@ func TestEvaluateAutomergeAllGreenMerges(t *testing.T) {
 	for _, k := range wantStages {
 		if !seen[k] {
 			t.Errorf("Conditions never recorded stage %q: %#v", k, got.Conditions)
+		}
+	}
+}
+
+// #1475 regression: only BEHIND holds a MERGEABLE PR at the mergeable stage.
+// Every other merge state GitHub reports for a mergeable PR, and an absent one,
+// still passes it.
+func TestEvaluateAutomergeMergeablePRInAnyNonBehindStateStillMerges(t *testing.T) {
+	for _, state := range []string{"CLEAN", "UNSTABLE", "HAS_HOOKS", "BLOCKED", ""} {
+		t.Run("mergeStateStatus="+state, func(t *testing.T) {
+			in := greenAutomergeInputs()
+			in.Mergeable, in.MergeStateStatus = "MERGEABLE", state
+			if got := evaluateAutomerge(in); !got.Merge {
+				t.Fatalf("Merge = false (reason %q), want true: only BEHIND holds a MERGEABLE PR", got.Reason)
+			}
+		})
+	}
+}
+
+// updatedPR is automergeEligiblePR after a branch update: CLEAN at head, with the
+// base commit the update was made against.
+func updatedPR(head, mergeState string) string {
+	return strings.Replace(automergeEligiblePR(), `"headRefOid":"abc"`, fmt.Sprintf(`"headRefOid":%q,"baseRefOid":"base-1","mergeStateStatus":%q`, head, mergeState), 1)
+}
+
+// #1475: a tick whose view is MERGEABLE but BEHIND never reaches `gh pr merge`.
+// The record is already issued at this pair, so the tick makes no update call:
+// the scripted gh answers only the five reads, and anything else fails it.
+func TestTickMergeableButBehindPRHoldsAtTheMergeableStageAndNeverMerges(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: updatedPR("abc", "BEHIND")},
+		{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
+		{out: `[]`},
+		{out: `[]`},
+		{out: `{"labels":[{"name":"automerge:ok"}]}`},
+	}, &calls)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900,
+		BranchUpdate: &branchUpdate{HeadSHA: "abc", BaseSHA: "base-1", Outcome: "issued"}}
+
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+
+	if s.AutomergeDecision != "held" || s.AutomergeReason != reasonBranchBehind {
+		t.Fatalf("automerge = %q (%q), want held (%q)", s.AutomergeDecision, s.AutomergeReason, reasonBranchBehind)
+	}
+	if mergeCallCount(calls) != 0 {
+		t.Errorf("gh pr merge was issued for a BEHIND PR: %#v", calls)
+	}
+	if s.BranchUpdate == nil || s.BranchUpdate.Outcome != "issued" {
+		t.Errorf("branchUpdate = %+v, want the issued record kept (the head has not moved)", s.BranchUpdate)
+	}
+}
+
+// #1475: after an update the merge gate re-reads the head, the CI buckets, the
+// feedback, the repo policy and the per-ticket grant on the resulting head; each
+// one flipped after the first evaluation holds the merge with its own reason. The
+// all-green control proves the flips, not the update, are what hold it.
+func TestTickAfterABranchUpdateTheMergeGateRechecksEveryInput(t *testing.T) {
+	const (
+		headMoved = "def"
+		green     = `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`
+		labels    = `{"labels":[{"name":"automerge:ok"}]}`
+		policy    = `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`
+	)
+	greenPR := updatedPR("abc", "CLEAN")
+	queue := queueProbeResponse(false, false, "abc")
+	for _, tc := range []struct {
+		name                                          string
+		pr, checks, comments, reviews, labels, policy string
+		wantReason                                    string
+	}{
+		{"the head moves again", updatedPR(headMoved, "CLEAN"), green, `[]`, `[]`, labels, policy, reasonHeadSHAChanged},
+		{"a check goes pending", greenPR, `[{"bucket":"pending","name":"test","state":"PENDING"}]`, `[]`, `[]`, labels, policy, reasonCICheckPending},
+		{"a check fails", greenPR, `[{"bucket":"fail","name":"test","state":"FAILURE"}]`, `[]`, `[]`, labels, policy, reasonCICheckFailed},
+		{"new feedback appears", greenPR, green, `[{"id":77,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, `[]`, labels, policy, reasonReviewPending},
+		{"the policy tightens", greenPR, green, `[]`, `[]`, labels, `{"automerge":{"maxChangedFiles":10,"maxDiffLines":1,"mergeMethod":"squash"}}`, reasonTooManyLines},
+		{"the grant is revoked", greenPR, green, `[]`, `[]`, `{"labels":[]}`, policy, reasonLabelMissing},
+		{"the PR falls behind again", updatedPR("abc", "BEHIND"), green, `[]`, `[]`, labels, policy, reasonBranchBehind},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			var calls [][]string
+			first := automergeFirstPassScript()
+			first[0] = scriptedCall{out: greenPR}
+			script := append(first, automergeRecheckScript(tc.pr, tc.checks, tc.comments, tc.reviews, tc.labels, tc.policy, queue)...)
+			withScriptedCommands(t, script, &calls)
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900,
+				BranchUpdate: &branchUpdate{HeadSHA: "old-head", BaseSHA: "base-1", Outcome: "issued"}}
+
+			if _, _, err := tick(&s); err != nil {
+				t.Fatal(err)
+			}
+
+			if s.BranchUpdate == nil || s.BranchUpdate.Outcome != "updated" {
+				t.Errorf("branchUpdate = %+v, want updated: the head moved off the attempted one", s.BranchUpdate)
+			}
+			if s.AutomergeDecision == "merge" || s.AutomergeReason != tc.wantReason {
+				t.Fatalf("automerge = %q (%q), want held (%q)", s.AutomergeDecision, s.AutomergeReason, tc.wantReason)
+			}
+			if !strings.HasPrefix(s.AutomergeDetail, "recheck") {
+				t.Errorf("AutomergeDetail = %q, want the recheck marker", s.AutomergeDetail)
+			}
+			if mergeCallCount(calls) != 0 {
+				t.Errorf("gh pr merge was issued: %#v", calls)
+			}
+		})
+	}
+
+	t.Run("control: everything unchanged merges, pinned to the head", func(t *testing.T) {
+		withFleetAutomergeEnabled(t, true)
+		var calls [][]string
+		first := automergeFirstPassScript()
+		first[0] = scriptedCall{out: greenPR}
+		script := append(first, automergeRecheckScript(greenPR, green, `[]`, `[]`, labels, policy, queue)...)
+		script = append(script,
+			scriptedCall{out: "Merged pull request #42 (o/r)"},
+			scriptedCall{out: `{"number":42,"title":"Change","state":"MERGED","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`},
+			scriptedCall{out: "https://example/pr/42#issuecomment-1"},
+		)
+		withScriptedCommands(t, script, &calls)
+		s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900,
+			BranchUpdate: &branchUpdate{HeadSHA: "old-head", BaseSHA: "base-1", Outcome: "issued"}}
+
+		if _, _, err := tick(&s); err != nil {
+			t.Fatal(err)
+		}
+
+		if s.AutomergeDecision != "merge" {
+			t.Fatalf("automerge = %q (%q), want merge", s.AutomergeDecision, s.AutomergeReason)
+		}
+		for _, c := range calls {
+			if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
+				if v, ok := argValue(c, "--match-head-commit"); !ok || v != "abc" {
+					t.Errorf("merge call %v, want --match-head-commit abc", c)
+				}
+			}
+		}
+	})
+}
+
+// #1475: with automerge off a BEHIND PR is still updated, and nothing merges or
+// writes a grant: the scripted gh answers the reads and the update's two calls,
+// and a merge, a label or any other call fails the tick.
+func TestTickBehindUpdateWithAutomergeOffNeverMergesOrWritesAGrant(t *testing.T) {
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: updatedPR("abc", "BEHIND")}, // pr view
+		{out: `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`},
+		{out: `{"data":{"repository":{"pullRequest":{"id":"PR_node42","headRefOid":"abc","baseRefOid":"base-1","isInMergeQueue":false,"isCrossRepository":false,"mergeStateStatus":"BEHIND"}}}}`},
+		{out: `{"data":{"updatePullRequestBranch":{"pullRequest":{"id":"PR_node42","headRefOid":"abc"}}}}`},
+		{out: `[]`},
+		{out: `[]`},
+	}, &calls)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+
+	if s.BranchUpdate == nil || s.BranchUpdate.Outcome != "issued" || s.BranchUpdate.HeadSHA != "abc" || s.BranchUpdate.BaseSHA != "base-1" {
+		t.Errorf("branchUpdate = %+v, want issued at abc/base-1", s.BranchUpdate)
+	}
+	if s.AutomergeReason != reasonAutomergeDisabled {
+		t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonAutomergeDisabled)
+	}
+	for _, c := range calls {
+		line := strings.Join(c, " ")
+		if strings.Contains(line, "pr merge") || strings.Contains(line, "automerge:ok") || strings.Contains(line, "issue edit") {
+			t.Errorf("a merge or grant write was issued: %q", line)
 		}
 	}
 }

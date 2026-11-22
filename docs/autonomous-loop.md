@@ -168,13 +168,16 @@ and applies after questions and checks complete. Set
 and has not been offered before, defaulting to `interactive`; `/cenci:configure --all`
 re-offers it with the committed value pre-selected.
 
-**Commit and push this to `main`.** On each pass dispatch runs `git fetch`, then reads
-it from the `origin/main` commit it has confirmed against the remote's current `main`
-tip (`git ls-remote origin refs/heads/main`), never from your working tree and never
-from local `HEAD`. An unpushed local edit grants nothing; a revocation pushed to
-`origin/main` takes effect on the next pass. A `main` that was deleted or renamed on
-the remote, or whose tip dispatch cannot confirm, denies unattended planning for that
-pass (`fetch_unconfirmed`, retryable) instead of trusting a stale local copy.
+**Commit and push this to the repository's default branch** (`main`, `master`, `trunk`,
+...; its name comes from the remote repository metadata, never from local `origin/HEAD`).
+On each pass dispatch runs `git fetch`, then reads it from the
+`refs/remotes/origin/<default>` commit it has confirmed against the remote's current
+default-branch tip (`git ls-remote origin refs/heads/<default>`), never from your working
+tree and never from local `HEAD`. An unpushed local edit grants nothing; a revocation
+pushed to the default branch takes effect on the next pass. A default branch that was
+deleted or renamed on the remote, or whose tip dispatch cannot confirm, denies unattended
+planning for that pass (`fetch_unconfirmed`, retryable) instead of trusting a stale local
+copy.
 
 A plan approved this way says so. Its front matter carries `approval: lean`, and the
 plan comment posted to the ticket opens with the auto-approved banner instead of the
@@ -665,7 +668,7 @@ it was evaluated.
 | `label` | Per-ticket grant | The PR's closing issues or base branch differ from the pin taken at arm (`closing issues changed since arm`, `base branch changed since arm`), the PR head is in another repository or its fork state is unknown (`PR head is in a different repository`, `PR cross-repository state unknown`), the pin is missing (`automerge grant pin missing`), the PR closes no issue, an issue's labels are unreadable, or any closed issue lacks `automerge:ok` |
 | `ci` | CI green (≥1 `pass`, rest `pass`/`skipping`) | No checks reported, zero `pass` with the rest `skipping`, or any check's bucket is `fail`, `pending`, `cancel`, empty, or unrecognized |
 | `review` | Feedback | A CI, merge or review worker still running (`branch repair worker still running`), CI repair in flight, pending feedback (an unreceipted PR comment included), a reopened resolution, a resolution or dismissal by an unauthorized actor (`review resolution actor not authorized`), a review worker that ended without a receipt, or a detection read that couldn't be proven complete |
-| `mergeable` | PR state | Draft, `MERGEABLE` unknown, or not mergeable (`PR has merge conflicts` when `mergeStateStatus` is `DIRTY`, `PR branch is behind base` when `BEHIND`) |
+| `mergeable` | PR state | Draft, `MERGEABLE` unknown, or not mergeable (`PR has merge conflicts` when `mergeStateStatus` is `DIRTY`, `PR branch is behind base` when `BEHIND`, even if `mergeable` is `MERGEABLE`). A clean `BEHIND` PR gets one head-pinned, non-force update from babysit, and this stage holds `PR branch is behind base` only while `mergeStateStatus` is `BEHIND`, and once the head moves the `ci` and `review` stages and the pre-merge recheck gate the new head; conflicts go to `merge-repair`; an unsupported or exhausted update needs input, and `cenci babysit reset <pr>` re-arms it |
 | `headsha` | Head commit | The PR's head SHA is unreadable at evaluation time |
 | `files` | Diff readability | Zero changed files, or a truncated file list |
 | `policy` | Policy block | The PR's base is not the repository's default branch (`PR base is not the default branch`), the default branch is unreadable (`default branch unreadable`), or `.cenci/config.json` on the base branch is unreadable, absent, or malformed |
@@ -746,19 +749,20 @@ comment at all — if there is no comment, no automerge landed.
 | Merging for one repo | Remove/narrow the repo's `automerge` block on the base branch | Next tick |
 | Merging for one ticket | Remove `automerge:ok` from the issue | Next tick |
 | Autonomous planning, everywhere | `cenci dispatch plan-refined off` | Next pass |
-| Autonomous planning for one repo | Push `planning.autonomy` off `"lean"` to `origin/main` | Next pass whose fetch confirms the remote `main` tip |
+| Autonomous planning for one repo | Push `planning.autonomy` off `"lean"` to the default branch | Next pass whose fetch confirms the remote default-branch tip |
 | Autonomous planning on this machine only, while a human is around | `cenci planning attended on` | Next dispatch pass; and the next planning session you launch |
 | Lean refinement for one repo | Set `refinement.autonomy` to anything other than `"lean"` | Next `/cenci:refine` |
 | Applying refinement without final review | Set `refinement.confirmBeforeApply: true` | Next `/cenci:refine` |
 | New refinement automerge grants | Set `refinement.automerge: "off"` | Next `/cenci:refine`; existing grants remain until re-refined or removed |
 | All dispatch | `cenci dispatch loop off` | Immediately; in-flight sessions finish |
 
-A revocation pushed to `origin/main` is honored even if your local checkout still has
-`"lean"` cached — the remote object is the only authority. Deleting or renaming the
-remote `main` is honored too: the local `origin/main` copy is only trusted while it
-matches the remote's current `main` tip, so a deleted, renamed or unconfirmable remote
-`main` (including a custom `remote.origin.fetch` that never updates it) denies
-unattended planning with `fetch_unconfirmed` until a pass confirms the tip again.
+A revocation pushed to the default branch is honored even if your local checkout still
+has `"lean"` cached — the remote object is the only authority. Deleting or renaming the
+remote default branch is honored too: the local `refs/remotes/origin/<default>` copy is
+only trusted while it matches the remote's current default-branch tip, so a deleted,
+renamed or unconfirmable remote default branch (including a custom `remote.origin.fetch`
+that never updates it) denies unattended planning with `fetch_unconfirmed` until a pass
+confirms the tip again.
 
 ## Known limits
 
@@ -782,9 +786,20 @@ Accepted and documented, not bugs:
 - **Merge state can lag by one supervision interval.** babysit re-evaluates on its own
   cadence (`babysitInterval`, default `15m`), so a PR can sit merge-ready for up to one
   interval.
-- **A merely-`BEHIND` branch is not auto-updated.** babysit observes and reports `PR
-  branch is behind base`, but performs no branch mutation — pushing the rebase remains a
-  manual step (`/cenci:sync`).
+- **A `BEHIND` branch is updated once per (head, base) pair, and some cases still need
+  you.** A clean `BEHIND` PR (`MERGEABLE`, no live branch writer) gets one server-side,
+  head-pinned, non-force update from babysit (`updatePullRequestBranch`, merge method,
+  `expectedHeadOid` set to the observed head); it never rebases, force-pushes or grants
+  merge permission, and it runs with automerge on or off. The merge gate holds
+  `PR branch is behind base` only while `mergeStateStatus` is `BEHIND`; once the head
+  moves, the `ci` and `review` stages and the pre-merge recheck gate the new head's
+  checks and feedback before any merge. A conflicting PR goes to the bounded
+  `merge-repair` episode instead, and a live repair or branch writer defers the update.
+  A rejected update is one failed attempt, a new base gets one new attempt, and three
+  consecutive failures hold at `input needed: branch update attempts exhausted`; a fork
+  PR, a merge-queue PR or a branch-protection refusal holds at `input needed: branch
+  update unsupported (<reason>)`. Update the branch yourself, then `cenci babysit reset
+  <pr>` re-arms it (`/cenci:sync` remains the manual way to rebase).
 
 ### Model fallback on flagged requests
 

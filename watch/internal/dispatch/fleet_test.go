@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -623,7 +624,64 @@ func TestQueryPlanningAttended(t *testing.T) {
 // probe's full ref/parse behavior is pinned by autonomy_test.go; this only
 // pins the wrapper's plumbing (dir + the remote-confirmed ref).
 func TestQueryRepoAutonomy_NonRepoIsUnreadable(t *testing.T) {
-	if got := QueryRepoAutonomy(t.TempDir()); got != RepoAutonomyUnreadable {
+	if got := QueryRepoAutonomy(t.TempDir(), "o/r"); got != RepoAutonomyUnreadable {
 		t.Errorf("QueryRepoAutonomy(non-repo) = %q, want %q", got, RepoAutonomyUnreadable)
+	}
+}
+
+// leanRemoteLocalClone builds a bare origin whose default branch is branch and
+// carries a committed lean config, plus a clone of it (so
+// refs/remotes/origin/<branch> exists locally).
+func leanRemoteLocalClone(t *testing.T, branch string) string {
+	t.Helper()
+	local, bare := initBareOriginAndLocalOn(t, branch)
+	pushFileOn(t, bare, branch, ".cenci/config.json", leanConfigJSON)
+	gitTest(t, local, "fetch", "origin")
+	return local
+}
+
+// TestQueryRepoAutonomy_ReadsTheMetadataDefaultBranch (#1475, AC 27): the
+// status surface reads the committed config at refs/remotes/origin/<the
+// metadata default branch>, so a trunk-default repo reports its real verdict.
+func TestQueryRepoAutonomy_ReadsTheMetadataDefaultBranch(t *testing.T) {
+	mainSyncGitEnv(t)
+	local := leanRemoteLocalClone(t, "trunk")
+	var asked []string
+	stubDefaultBranch(t, func(repo string) (string, error) {
+		asked = append(asked, repo)
+		return "trunk", nil
+	})
+
+	if got := QueryRepoAutonomy(local, "o/r"); got != RepoAutonomyLean {
+		t.Errorf("QueryRepoAutonomy(trunk default) = %q, want %q", got, RepoAutonomyLean)
+	}
+	if len(asked) != 1 || asked[0] != "o/r" {
+		t.Errorf("default branch asked for %v, want exactly the repo o/r", asked)
+	}
+}
+
+// TestQueryRepoAutonomy_MetadataFailureOrInvalidNameIsUnreadable (#1475,
+// AC 27): a failed metadata read, an empty name or an invalid name fails
+// closed as unreadable, even when a lean config sits at refs/remotes/origin/main
+// -- the old literal-main read would have reported lean here.
+func TestQueryRepoAutonomy_MetadataFailureOrInvalidNameIsUnreadable(t *testing.T) {
+	mainSyncGitEnv(t)
+	local := leanRemoteLocalClone(t, "main")
+	cases := []struct {
+		name string
+		fn   func(string) (string, error)
+	}{
+		{"metadata read fails", func(string) (string, error) { return "", fmt.Errorf("gh api failed") }},
+		{"empty name", func(string) (string, error) { return "", nil }},
+		{"invalid name", func(string) (string, error) { return "bad..name", nil }},
+		{"name the remote lacks", func(string) (string, error) { return "trunk", nil }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stubDefaultBranch(t, c.fn)
+			if got := QueryRepoAutonomy(local, "o/r"); got != RepoAutonomyUnreadable {
+				t.Errorf("QueryRepoAutonomy = %q, want %q", got, RepoAutonomyUnreadable)
+			}
+		})
 	}
 }

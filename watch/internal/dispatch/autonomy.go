@@ -33,7 +33,7 @@ type repoAutonomyProbe struct {
 // lean planning. Callers of this package's production entry point,
 // probeRepoAutonomies, must always pass a remote-confirmed ref: the confirmed
 // object ID (#903) threaded through mainSyncResult.AutonomyRef, which equals
-// the remote's current main tip as `git ls-remote origin refs/heads/main`
+// the remote default branch's current tip as `git ls-remote origin refs/heads/<default>`
 // reported it this pass -- never a ref name, which could be stale or
 // unpushed -- so the authorization decision can only ever be traced to an
 // object the remote confirmed this pass, with no fallback to local HEAD. In
@@ -167,8 +167,8 @@ func fetchUnconfirmedReason(s mainSyncResult, hasSync bool) string {
 //
 // Unlike the pre-#877 FreshRef convention, a repo with no confirmed
 // AutonomyRef this pass -- an explicit fetch-failure result, a successful
-// fetch whose remote main tip could not be confirmed (#903: a deleted or
-// renamed remote main, a stale tracking ref, an unreachable ls-remote), or a
+// fetch whose remote default-branch tip could not be confirmed (#903: a deleted or
+// renamed remote default branch, a stale tracking ref, an unreachable ls-remote), or a
 // syncs map lookup miss for a configured repo (no entry at all) -- is
 // classified RepoAutonomyFetchUnconfirmed WITHOUT running any git command at
 // all: there is deliberately no "HEAD" fallback here (removed by #877), since
@@ -194,7 +194,7 @@ func probeRepoAutonomies(repos []RepoConfig, syncs map[string]mainSyncResult, ou
 		s, ok := syncs[rc.Repo]
 		if !ok || s.AutonomyRef == "" {
 			// No remote-confirmed object this pass (fetch failed, the remote
-			// main tip could not be confirmed, or the repo has no syncs entry
+			// default-branch tip could not be confirmed, or the repo has no syncs entry
 			// at all) -- never probe. The log line always carries a reason so
 			// an operator can tell these apart (newlines collapsed: one line
 			// per repo).

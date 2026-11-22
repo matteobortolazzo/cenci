@@ -277,9 +277,11 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		out = os.Stdout
 	}
 
-	// Once per pass, per enrolled repo, sync local main with origin/main
-	// before collecting tickets/plans (#822) -- so staleness and new
-	// planning sessions never evaluate against stale code. RunOnce is the
+	// Once per pass, per enrolled repo, sync the local default branch (the
+	// remote-metadata default_branch, #1475 -- `main`, `master`, `trunk`, ...)
+	// with refs/remotes/origin/<default> before collecting tickets/plans (#822)
+	// -- so staleness and new planning sessions never evaluate against stale
+	// code. The pass runs even with zero candidate tickets. RunOnce is the
 	// sole owner of this sync: RunReconcileOnce also calls CollectTickets in
 	// the same combined pass (combined.go) but deliberately passes a nil
 	// map and never syncs, so a fetch+merge never runs twice per pass.
@@ -287,9 +289,10 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 
 	// Repo-autonomy probe (#851, #877): reads each repo's committed
 	// `planning.autonomy` at its own resolved AutonomyRef (from syncs above)
-	// -- the object ID of the remote's main tip, confirmed against `git
-	// ls-remote origin refs/heads/main` this pass (#903), never local HEAD,
-	// FreshRef or a possibly stale refs/remotes/origin/main -- so a Refined
+	// -- the object ID of the remote default branch's tip, confirmed against
+	// `git ls-remote origin refs/heads/<default>` this pass (#903, #1475),
+	// never local HEAD, FreshRef or a possibly stale
+	// refs/remotes/origin/<default> -- so a Refined
 	// planning pickup or autonomous re-plan can no longer be authorized by
 	// dispatch.planRefined alone.
 	autonomies := probeRepoAutonomies(cfg.Repos, syncs, out)
@@ -465,7 +468,8 @@ func narrowAutonomiesAttended(autonomies map[string]RepoAutonomy, cfg Config, ou
 // FreshRef (from syncs, the syncMains map) is "HEAD" (the common case), nil
 // is passed through -- ReadPlans' existing default wiring already reads
 // planfile.CommitsBehind against local HEAD. Otherwise (the dry-run
-// strictly-behind fast-forward-pending case, FreshRef == "origin/main"), the
+// strictly-behind fast-forward-pending case, FreshRef is the fully qualified
+// refs/remotes/origin/<default>, #1475), the
 // closure scopes the read to that ref via planfile.CommitsBehindRef, so
 // dry-run's staleness computation matches the fetched blob the subsequent
 // real pass would consume, rather than stale local HEAD. A repo absent from

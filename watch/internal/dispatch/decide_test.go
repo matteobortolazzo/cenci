@@ -899,13 +899,62 @@ func TestDecideMainSyncGate_FailedSkipsWithDistinctReason(t *testing.T) {
 	}
 }
 
-// TestDecideMainSyncGate_FetchFailedIsUngated covers plan test 15: a
-// transient `git fetch` failure must never gate dispatch -- it self-heals
-// next pass.
-func TestDecideMainSyncGate_FetchFailedIsUngated(t *testing.T) {
+// TestDecideMainSyncGate_FetchFailedIsGated covers plan test 15, reversed by
+// #1475 (AC 7): a failed fetch (or a remote that lacks its default branch) used
+// to be ungated because it self-heals next pass, but it now skips every pickup
+// in the repo for the pass with its own distinct, retryable reason.
+func TestDecideMainSyncGate_FetchFailedIsGated(t *testing.T) {
 	in := baseInputs()
 	in.Tickets[0].MainSync = MainSyncFetchFailed
-	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	got := Decide(in)
+	assertDecisions(t, got, []wantDecision{{42, ActionSkip, "default branch fetch failed (retryable)", ""}})
+}
+
+// TestDecideMainSyncGate_DefaultBranchStatesGateEveryPickupType covers #1475
+// AC 7 for the three new statuses and the now-gated fetch_failed: each gates the
+// ordinary Planned pickup, a fresh Refined planning candidate and an autonomous
+// re-plan candidate with its own distinct reason.
+func TestDecideMainSyncGate_DefaultBranchStatesGateEveryPickupType(t *testing.T) {
+	tests := []struct {
+		name       string
+		mainSync   MainSync
+		wantReason string
+	}{
+		{"fetch failed", MainSyncFetchFailed, "default branch fetch failed (retryable)"},
+		{"not default", MainSyncNotDefault, "local checkout not on the default branch"},
+		{"dirty", MainSyncDirty, "local default branch has conflicting local changes"},
+		{"default branch unreadable", MainSyncDefaultBranchUnreadable, "remote default branch unreadable"},
+	}
+	seen := map[string]string{}
+	for _, tc := range tests {
+		if prior, ok := seen[tc.wantReason]; ok {
+			t.Fatalf("both %q and %q share the reason %q -- must be distinct", prior, tc.name, tc.wantReason)
+		}
+		seen[tc.wantReason] = tc.name
+		t.Run(tc.name+"/ordinary Planned pickup", func(t *testing.T) {
+			in := baseInputs()
+			in.Tickets[0].MainSync = tc.mainSync
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, tc.wantReason, ""}})
+		})
+		t.Run(tc.name+"/fresh Refined planning candidate", func(t *testing.T) {
+			in := planningCandidateInputs()
+			in.Tickets[0].MainSync = tc.mainSync
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, tc.wantReason, ""}})
+		})
+		t.Run(tc.name+"/autonomous re-plan candidate", func(t *testing.T) {
+			in := baseInputs()
+			in.Config.PlanRefined = true
+			in.RepoAutonomy = leanAutonomy("o/r")
+			in.Plans[0].CommitsBehind = 10 // stale
+			in.Tickets[0].MainSync = tc.mainSync
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, tc.wantReason, ""}})
+		})
+	}
+	for _, existing := range []string{reasonMainDiverged, reasonMainSyncFailed, reasonMainNotMain, reasonMainDetached, reasonMainMissing, reasonMainSyncUnknown} {
+		if prior, ok := seen[existing]; ok {
+			t.Fatalf("a #1475 reason collapsed into the existing %q (%s)", existing, prior)
+		}
+	}
 }
 
 // TestDecideMainSyncGate_ExplicitSkippedIsUngated covers plan test 16: an

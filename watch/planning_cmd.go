@@ -97,7 +97,7 @@ func runPlanningAttended(args []string) {
 	var autonomy dispatch.RepoAutonomy
 	if identity, derr := dispatch.DetectRepoIdentity(*dir); derr == nil {
 		repoName = identity.Repo
-		autonomy = dispatch.QueryRepoAutonomy(*dir)
+		autonomy = dispatch.QueryRepoAutonomy(*dir, identity.Repo)
 	}
 
 	if *jsonOut {
@@ -134,12 +134,12 @@ func runPlanningAttended(args []string) {
 	}
 	if repoName != "" {
 		fmt.Printf("  repo: %s\n", repoName)
-		fmt.Printf("  repo autonomy (planning.autonomy @ origin/main, as of last fetch): %s\n", autonomy)
+		fmt.Printf("  repo autonomy (planning.autonomy @ origin/<default>, as of last fetch): %s\n", autonomy)
 		fmt.Printf("  plan-refined (dispatch.planRefined): %v\n", planRefined)
 		if planningAttendedAuthorized(attended, planRefined, autonomy) {
 			fmt.Printf("  authorized: yes — Refined tickets here are picked up for unattended planning\n")
 		} else {
-			fmt.Printf("  authorized: no — needs attended off, the fleet plan-refined flag on, and planning.autonomy \"lean\" committed on origin/main\n")
+			fmt.Printf("  authorized: no — needs attended off, the fleet plan-refined flag on, and planning.autonomy \"lean\" committed on origin/<default>\n")
 		}
 	}
 }

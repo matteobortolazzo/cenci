@@ -63,8 +63,21 @@ const (
 	// empty/unrecognized MergeStateStatus, still falls back to
 	// reasonNotMergeable -- kept as the catch-all so no existing consumer
 	// loses its match.
-	reasonMergeConflicts        = "PR has merge conflicts"
-	reasonBranchBehind          = "PR branch is behind base"
+	reasonMergeConflicts = "PR has merge conflicts"
+	// reasonBranchBehind (#1475) holds the mergeable stage whenever
+	// mergeStateStatus is BEHIND, whatever mergeable says: GitHub reports a branch
+	// that must be updated as MERGEABLE + BEHIND, which used to reach `gh pr merge`.
+	// The hold clears once the head-pinned branch update (branchupdate.go) lands and
+	// the new head's checks are green; an unsupported or exhausted update keeps it
+	// until the branch is updated by hand or `cenci babysit reset <pr>` re-arms it.
+	reasonBranchBehind = "PR branch is behind base"
+	// noteBranchUpdateUnsupported and noteBranchUpdateExhausted (#1475) are the
+	// input-needed notes of the two branch-update holds. noteBranchUpdateUnsupported
+	// is followed by " (<reason>)". Both lead AutomergeDetail and the
+	// babysit-attention launch argument, and are recovered by `cenci babysit reset
+	// <pr>` (or by updating the branch by hand).
+	noteBranchUpdateUnsupported = "input needed: branch update unsupported"
+	noteBranchUpdateExhausted   = "input needed: branch update attempts exhausted"
 	reasonHeadSHAUnknown        = "PR head commit SHA unknown"
 	reasonNoChanges             = "PR has no changed files"
 	reasonDiffTruncated         = "diff file list truncated"
@@ -398,8 +411,9 @@ type automergeInputs struct {
 	Mergeable string
 	// MergeStateStatus (#995) refines the mergeable stage's reason when
 	// Mergeable != "MERGEABLE": see reasonMergeConflicts/reasonBranchBehind
-	// above. Never consulted when Mergeable == "MERGEABLE" or "UNKNOWN" --
-	// those two checks stay ordered ahead of it, untouched.
+	// above. Never consulted when Mergeable == "UNKNOWN" -- that check stays
+	// ordered ahead of it, untouched. When Mergeable == "MERGEABLE" only BEHIND
+	// is consulted (#1475).
 	MergeStateStatus string
 	// HeadRefOID is the PR's head commit SHA at the moment the condition
 	// chain was evaluated -- runAutomerge pins `gh pr merge` to this exact
@@ -704,11 +718,17 @@ func evaluateAutomerge(in automergeInputs) automergeDecision {
 		switch in.MergeStateStatus {
 		case "DIRTY":
 			return fail("mergeable", reasonMergeConflicts)
-		case "BEHIND":
+		case mergeStateBehind:
 			return fail("mergeable", reasonBranchBehind)
 		default:
 			return fail("mergeable", reasonNotMergeable)
 		}
+	}
+	// #1475: a MERGEABLE PR that is BEHIND its base still holds. Only the
+	// mergeStateStatus is consulted, so every other state of a mergeable PR (CLEAN,
+	// UNSTABLE, HAS_HOOKS, BLOCKED, or none) passes as before.
+	if in.MergeStateStatus == mergeStateBehind {
+		return fail("mergeable", reasonBranchBehind)
 	}
 	pass("mergeable")
 

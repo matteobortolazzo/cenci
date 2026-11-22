@@ -1998,14 +1998,15 @@ func TestProbeRepoAutonomies_DryRunAndRealPassAgreeUsingSameFreshRef(t *testing.
 
 // -- #877: RunOnce end-to-end, fetch-outage gating and a mixed fleet --------
 
-// TestRunOnce_FetchOutage_HoldsPlanningLaunchesNothing_OrdinaryPlannedStillDispatches
-// covers the ticket's core availability tradeoff in one pass: a repo whose
-// `git fetch origin` fails this pass must hold its Refined planning
-// candidate (launching no process at all), while an ordinary, already-
-// approved `Planned` ticket in a DIFFERENT, healthy repo in the very same
-// pass must still dispatch normally -- a fetch outage in one repo must never
-// bleed into ordinary implementation work elsewhere.
-func TestRunOnce_FetchOutage_HoldsPlanningLaunchesNothing_OrdinaryPlannedStillDispatches(t *testing.T) {
+// TestRunOnce_FetchOutage_HoldsEveryPickupInThatRepo_OtherRepoStillDispatches
+// covers the ticket's core availability tradeoff in one pass, as reversed by
+// #1475 (a failed fetch is now gated for every pickup, not only planning): a
+// repo whose `git fetch origin` fails this pass must hold its Refined planning
+// candidate with the fetch-failed reason (launching no process at all), while
+// an ordinary, already-approved `Planned` ticket in a DIFFERENT, healthy repo
+// in the very same pass must still dispatch normally -- a fetch outage in one
+// repo must never bleed into implementation work elsewhere.
+func TestRunOnce_FetchOutage_HoldsEveryPickupInThatRepo_OtherRepoStillDispatches(t *testing.T) {
 	mainSyncGitEnv(t)
 	serveChainSnapshot(t, watch.StateSnapshot{}) // reachable, idle daemon
 
@@ -2055,11 +2056,244 @@ esac
 	}
 
 	log := buf.String()
-	if !strings.Contains(log, "o/a#10 skip: "+reasonAutonomyFetchUnconfirmed) {
-		t.Errorf("expected o/a#10 to be held with the fetch-unconfirmed reason, got log %q", log)
+	if !strings.Contains(log, "o/a#10 skip: "+reasonMainFetchFailed) {
+		t.Errorf("expected o/a#10 to be held with the fetch-failed reason, got log %q", log)
 	}
 	if len(spawnedTickets) != 1 || spawnedTickets[0] != "20" {
 		t.Errorf("spawned tickets = %v, want exactly [\"20\"] (o/b's ordinary Planned pickup unaffected by o/a's fetch outage)", spawnedTickets)
+	}
+}
+
+// -- #1475: RunOnce over a non-main default branch --------------------------
+
+// plannedTicketFakeGH is a fake gh whose repo has one Planned ticket (#20)
+// assigned to octocat and no open PRs.
+const plannedTicketFakeGH = `
+case "$1 $2" in
+  "issue list") printf '[{"number":20,"title":"T20","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}]' ;;
+  "api graphql") printf '` + emptyOpenPRPageJSON + `' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`
+
+// TestRunOnce_ZeroCandidatePass_StillSyncsANonMainDefault covers AC 9, first
+// half: a pass with zero candidate tickets still runs the sync on a trunk
+// default, fast-forwarding to the remote tip and logging the synced line, with
+// no forbidden git command in the pass.
+func TestRunOnce_ZeroCandidatePass_StillSyncsANonMainDefault(t *testing.T) {
+	mainSyncGitEnv(t)
+	fixedDefaultBranch(t, "trunk")
+	local, bare := trunkBehind(t)
+	want := bareBranchOID(t, bare, "trunk")
+	installFakeGHOnPath(t, emptyIssuesFakeGH)
+	logPath := installGitCommandLog(t)
+
+	cfg := testConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local}}
+	var buf bytes.Buffer
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	if len(decisions) != 0 {
+		t.Errorf("got %d decisions, want a zero-candidate pass", len(decisions))
+	}
+	if got := gitTest(t, local, "rev-parse", "HEAD"); got != want {
+		t.Errorf("local HEAD = %s, want the remote trunk tip %s", got, want)
+	}
+	if line := "dispatch: main sync o/r: synced (fast-forwarded to refs/remotes/origin/trunk)\n"; !strings.Contains(buf.String(), line) {
+		t.Errorf("log missing %q:\n%s", line, buf.String())
+	}
+	assertSafeGitCommands(t, logPath)
+}
+
+// TestRunOnce_RemotePlanMergedBetweenPasses_MakesTheTicketEligibleOnTrunk covers
+// AC 9, second half: a Planned ticket whose plan is only on the remote default
+// branch is not dispatchable on the first pass, a plan merged on the remote
+// between the passes shows in the second pass's synced HEAD, and the ticket
+// dispatches in that second pass.
+func TestRunOnce_RemotePlanMergedBetweenPasses_MakesTheTicketEligibleOnTrunk(t *testing.T) {
+	mainSyncGitEnv(t)
+	isolateDaemonSocket(t)
+	serveChainSnapshot(t, watch.StateSnapshot{})
+	fixedDefaultBranch(t, "trunk")
+	local, bare := initBareOriginAndLocalOn(t, "trunk")
+	planSha := gitTest(t, local, "rev-parse", "HEAD")
+	installFakeGHOnPath(t, plannedTicketFakeGH)
+
+	var spawned []string
+	stubRunFn(t, func(opts run.Opts, _ run.Controller) error {
+		spawned = append(spawned, opts.WindowTicket)
+		return nil
+	})
+	cfg := testConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
+
+	var first bytes.Buffer
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &first); err != nil {
+		t.Fatalf("first RunOnce: %v", err)
+	}
+	if len(spawned) != 0 {
+		t.Fatalf("first pass spawned %v, want nothing: the plan is not merged yet", spawned)
+	}
+
+	// The plan merges on the remote between the passes. Its lean authorization
+	// is recorded locally, as `cenci pipeline plan` would have.
+	scratch := filepath.Join(t.TempDir(), "scratch")
+	gitTestNoDir(t, "clone", "--branch", "trunk", bare, scratch)
+	writeAuthorizedPlan(t, scratch, "20-x.md", "---\nticketId: 20\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
+	gitTest(t, scratch, "add", ".plans/20-x.md")
+	gitTest(t, scratch, "commit", "-m", "plan for 20")
+	gitTest(t, scratch, "push", "origin", "trunk")
+	writeStateFile(t, local, 20, readFile(t, filepath.Join(scratch, ".cenci", "pipeline", "20.json")))
+
+	var second bytes.Buffer
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &second); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+
+	if got := gitTest(t, local, "rev-parse", "HEAD"); got != bareBranchOID(t, bare, "trunk") {
+		t.Errorf("local HEAD = %s, want the second pass to have fast-forwarded to the remote tip", got)
+	}
+	if len(spawned) != 1 || spawned[0] != "20" {
+		t.Errorf("spawned = %v, want ticket 20 dispatched in the second pass\nlog:\n%s", spawned, second.String())
+	}
+}
+
+// TestRunOnce_DefaultBranchUnreadable_SkipsEveryPickupWithAOneLineReason covers
+// AC 7: with the default-branch metadata unreadable, an ordinary Planned pickup
+// and a Refined planning candidate in the repo are both skipped with the
+// one-line reason, nothing spawns and no fetch-based authorization is made.
+func TestRunOnce_DefaultBranchUnreadable_SkipsEveryPickupWithAOneLineReason(t *testing.T) {
+	mainSyncGitEnv(t)
+	isolateDaemonSocket(t)
+	serveChainSnapshot(t, watch.StateSnapshot{})
+	stubDefaultBranch(t, func(string) (string, error) { return "", fmt.Errorf("gh api failed") })
+	local, bare := initBareOriginAndLocalOn(t, "main")
+	pushFileOn(t, bare, "main", ".cenci/config.json", leanConfigJSON)
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":20,"title":"T20","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]},{"number":10,"title":"T10","labels":[{"name":"Refined"}],"assignees":[{"login":"octocat"}]}]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+	stubRunFn(t, func(opts run.Opts, _ run.Controller) error {
+		t.Fatalf("nothing may spawn when the default branch is unreadable, got ticket %s", opts.WindowTicket)
+		return nil
+	})
+	trackingBefore := gitTest(t, local, "rev-parse", "refs/remotes/origin/main")
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
+	var buf bytes.Buffer
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	for _, n := range []int{10, 20} {
+		want := fmt.Sprintf("o/r#%d skip: %s\n", n, reasonMainDefaultBranchUnknown)
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("log missing %q:\n%s", want, buf.String())
+		}
+	}
+	if !strings.Contains(buf.String(), "dispatch: main sync o/r: default_branch_unreadable (") {
+		t.Errorf("log missing the default_branch_unreadable sync line:\n%s", buf.String())
+	}
+	if got := gitTest(t, local, "rev-parse", "refs/remotes/origin/main"); got != trackingBefore {
+		t.Errorf("tracking ref moved %s -> %s: a fetch ran without a default branch", trackingBefore, got)
+	}
+}
+
+// TestRunOnce_NullDefaultBranchMetadata_SkipsEveryPickupAsUnreadable is the
+// null-metadata twin of the test above, through the real metadata read: a JSON
+// null default_branch gates every pickup with the unreadable reason (not the
+// retryable fetch-failed one) and nothing spawns.
+func TestRunOnce_NullDefaultBranchMetadata_SkipsEveryPickupAsUnreadable(t *testing.T) {
+	mainSyncGitEnv(t)
+	isolateDaemonSocket(t)
+	serveChainSnapshot(t, watch.StateSnapshot{})
+	stubDefaultBranch(t, fetchDefaultBranch)
+	local, bare := initBareOriginAndLocalOn(t, "main")
+	pushFileOn(t, bare, "main", ".cenci/config.json", leanConfigJSON)
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":20,"title":"T20","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]},{"number":10,"title":"T10","labels":[{"name":"Refined"}],"assignees":[{"login":"octocat"}]}]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  "api repos/o/r") printf '{"default_branch":null}\n' ;;
+  *) exit 1 ;;
+esac
+`)
+	stubRunFn(t, func(opts run.Opts, _ run.Controller) error {
+		t.Fatalf("nothing may spawn when the default branch is null, got ticket %s", opts.WindowTicket)
+		return nil
+	})
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
+	var buf bytes.Buffer
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	for _, n := range []int{10, 20} {
+		want := fmt.Sprintf("o/r#%d skip: %s\n", n, reasonMainDefaultBranchUnknown)
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("log missing %q:\n%s", want, buf.String())
+		}
+	}
+	if !strings.Contains(buf.String(), "dispatch: main sync o/r: default_branch_unreadable (") {
+		t.Errorf("log missing the default_branch_unreadable sync line:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "fetch_failed") {
+		t.Errorf("log reports fetch_failed for a null default branch:\n%s", buf.String())
+	}
+}
+
+// TestReadPlansForRepos_NonMainDefault_DryRunCommitsBehindMatchesRealPass covers
+// AC 8 on a trunk default: a dry-run pass reads refs/remotes/origin/trunk and the
+// following real pass reads HEAD after the fast-forward, and both give the same
+// plan-freshness verdict for the same strictly-behind fixture.
+func TestReadPlansForRepos_NonMainDefault_DryRunCommitsBehindMatchesRealPass(t *testing.T) {
+	mainSyncGitEnv(t)
+	fixedDefaultBranch(t, "trunk")
+	local, bare := initBareOriginAndLocalOn(t, "trunk")
+	planSha := gitTest(t, local, "rev-parse", "HEAD")
+	for i, name := range []string{"advance1.txt", "advance2.txt", "advance3.txt"} {
+		pushFileOn(t, bare, "trunk", name, fmt.Sprintf("c%d", i))
+	}
+	const wantCommitsBehind = 3
+	writePlan(t, local, "42-x.md", "---\nticketId: 42\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
+	repos := []RepoConfig{{Repo: "o/r", Dir: local}}
+
+	dryRunSyncs := syncMains(repos, io.Discard, true)
+	dryPlans, _, _, err := readPlansForRepos(repos, dryRunSyncs, io.Discard)
+	if err != nil {
+		t.Fatalf("readPlansForRepos (dry-run): %v", err)
+	}
+	if len(dryPlans) != 1 || dryPlans[0].CommitsBehind != wantCommitsBehind {
+		t.Fatalf("dry-run plans = %+v, want one plan %d commits behind", dryPlans, wantCommitsBehind)
+	}
+	if got := gitTest(t, local, "rev-parse", "HEAD"); got != planSha {
+		t.Errorf("dry-run moved HEAD %s -> %s", planSha, got)
+	}
+
+	realSyncs := syncMains(repos, io.Discard, false)
+	realPlans, _, _, err := readPlansForRepos(repos, realSyncs, io.Discard)
+	if err != nil {
+		t.Fatalf("readPlansForRepos (real pass): %v", err)
+	}
+	if len(realPlans) != 1 || realPlans[0].CommitsBehind != dryPlans[0].CommitsBehind {
+		t.Errorf("real-pass plans = %+v, want one plan with the dry-run's %d commits behind", realPlans, dryPlans[0].CommitsBehind)
+	}
+	if got := gitTest(t, local, "rev-parse", "HEAD"); got != bareBranchOID(t, bare, "trunk") {
+		t.Errorf("real pass left HEAD at %s, want the remote tip", got)
 	}
 }
 
@@ -2115,6 +2349,95 @@ esac
 	}
 	if !strings.Contains(log, "repo autonomy o/r: fetch_unconfirmed (") {
 		t.Errorf("expected a fetch_unconfirmed repo-autonomy line carrying a reason, got log %q", log)
+	}
+}
+
+// TestRunOnce_UnconfirmedRemoteTip_HoldsOnlyPlanning_OrdinaryPlannedStillDispatches
+// covers the #1475 owner ruling end to end, in ONE repo and ONE pass: when
+// `git ls-remote origin refs/heads/<default>` yields no line, several lines or
+// a malformed OID, the fetch and fast-forward still succeed (the sync status
+// stays synced, so it gates nothing), but the autonomy ref stays empty. Only
+// the unattended Refined planning candidate is held, with the fetch-unconfirmed
+// reason, even though the repo's remote default branch carries a lean grant;
+// the ordinary, already-approved Planned ticket in the same repo dispatches.
+func TestRunOnce_UnconfirmedRemoteTip_HoldsOnlyPlanning_OrdinaryPlannedStillDispatches(t *testing.T) {
+	advertised := func(oid string) string {
+		return fmt.Sprintf("printf '%%s\\trefs/heads/DEFAULT\\n' %s", oid)
+	}
+	cases := []struct {
+		name     string
+		branch   string
+		shimBody string
+	}{
+		{"no line on main", "main", "exit 2"},
+		{"no line on trunk", "trunk", "exit 2"},
+		{"several lines on main", "main", advertised(testOID40) + "; " + advertised(testOID40) + "; exit 0"},
+		{"malformed oid on trunk", "trunk", advertised("nothex") + "; exit 0"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mainSyncGitEnv(t)
+			isolateDaemonSocket(t)
+			serveChainSnapshot(t, watch.StateSnapshot{}) // reachable, idle daemon
+			fixedDefaultBranch(t, c.branch)
+
+			local, bare := initBareOriginAndLocalOn(t, c.branch)
+			pushFileOn(t, bare, c.branch, ".cenci/config.json", leanConfigJSON)
+			gitTest(t, local, "fetch", "origin")
+			gitTest(t, local, "merge", "--ff-only", "origin/"+c.branch)
+			if got := probeRepoAutonomy(local, "refs/remotes/origin/"+c.branch); got != RepoAutonomyLean {
+				t.Fatalf("test setup: the remote %s carries a lean grant but reads %q (otherwise the tip confirmation is not what blocks planning)", c.branch, got)
+			}
+			planSha := gitTest(t, local, "rev-parse", "HEAD")
+			writeAuthorizedPlan(t, local, "20-x.md", "---\nticketId: 20\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
+
+			installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":10,"title":"T10","labels":[{"name":"Refined"}],"assignees":[{"login":"octocat"}]},{"number":20,"title":"T20","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+			// The tip cannot be confirmed; every other git command is real.
+			installGitShim(t, strings.ReplaceAll(
+				fmt.Sprintf("for a in \"$@\"; do if [ \"$a\" = ls-remote ]; then %s; fi; done", c.shimBody),
+				"DEFAULT", c.branch))
+
+			var spawnedTickets []string
+			stubRunFn(t, func(opts run.Opts, _ run.Controller) error {
+				if opts.WindowTicket == "10" {
+					t.Error("a repo whose remote tip is unconfirmed must never spawn a planning session")
+				}
+				spawnedTickets = append(spawnedTickets, opts.WindowTicket)
+				return nil
+			})
+
+			cfg := testConfig()
+			cfg.PlanRefined = true
+			cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "session-r"}}
+
+			var buf bytes.Buffer
+			if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
+				t.Fatalf("RunOnce returned unexpected error: %v", err)
+			}
+
+			log := buf.String()
+			if !strings.Contains(log, "o/r#10 skip: "+reasonAutonomyFetchUnconfirmed) {
+				t.Errorf("expected the Refined candidate o/r#10 to be held with the fetch-unconfirmed reason, got log %q", log)
+			}
+			if !strings.Contains(log, "dispatch: main sync o/r: "+string(MainSyncSynced)+" (") {
+				t.Errorf("expected the sync status to stay %q, got log %q", MainSyncSynced, log)
+			}
+			for _, gating := range []MainSync{MainSyncFetchFailed, MainSyncDefaultBranchUnreadable} {
+				if strings.Contains(log, "main sync o/r: "+string(gating)) {
+					t.Errorf("an unconfirmed tip must not change the sync status to %q, got log %q", gating, log)
+				}
+			}
+			if len(spawnedTickets) != 1 || spawnedTickets[0] != "20" {
+				t.Errorf("spawned tickets = %v, want exactly [\"20\"] (the ordinary Planned pickup in the same repo is unaffected)\nlog:\n%s", spawnedTickets, log)
+			}
+		})
 	}
 }
 
@@ -2249,9 +2572,9 @@ esac
 	wantSubstrings := map[string]string{
 		"o/r2#102": "o/r2#102 skip: repo autonomy not lean",
 		"o/r3#103": "o/r3#103 skip: repo config malformed",
-		"o/r4#104": "o/r4#104 skip: " + reasonAutonomyFetchUnconfirmed,
+		"o/r4#104": "o/r4#104 skip: " + reasonMainFetchFailed,
 		"o/r5#105": "o/r5#105 skip: " + reasonMainNotMain,
-		"o/r6#106": "o/r6#106 skip: " + reasonAutonomyFetchUnconfirmed,
+		"o/r6#106": "o/r6#106 skip: " + reasonMainFetchFailed,
 	}
 	for name, want := range wantSubstrings {
 		if !strings.Contains(log, want) {

@@ -502,15 +502,16 @@ func runDispatchPlanRefined(args []string) {
 	// Repo fields only render when --dir resolves to a git repo with an
 	// origin remote — status must work from anywhere, so a plain directory
 	// just gets the fleet flags. The autonomy probe reads the committed
-	// config at refs/remotes/origin/main as of the last fetch and fails
-	// closed (unreadable) when that ref doesn't resolve. Unlike the dispatch
+	// config at refs/remotes/origin/<default> (the repository metadata
+	// default_branch, #1475) as of the last fetch and fails closed
+	// (unreadable) when the name or that ref doesn't resolve. Unlike the dispatch
 	// gate, it never fetches and does not confirm the ref against the
-	// remote's current main tip, so it can lag the gate.
+	// remote default branch's current tip, so it can lag the gate.
 	var repoName string
 	var autonomy dispatch.RepoAutonomy
 	if identity, derr := dispatch.DetectRepoIdentity(*dir); derr == nil {
 		repoName = identity.Repo
-		autonomy = dispatch.QueryRepoAutonomy(*dir)
+		autonomy = dispatch.QueryRepoAutonomy(*dir, identity.Repo)
 	}
 
 	if *jsonOut {
@@ -547,12 +548,12 @@ func runDispatchPlanRefined(args []string) {
 	}
 	if repoName != "" {
 		fmt.Printf("  repo: %s\n", repoName)
-		fmt.Printf("  repo autonomy (planning.autonomy @ origin/main, as of last fetch): %s\n", autonomy)
+		fmt.Printf("  repo autonomy (planning.autonomy @ origin/<default>, as of last fetch): %s\n", autonomy)
 		fmt.Printf("  attended (planning.attended): %v\n", attended)
 		if planningAttendedAuthorized(attended, enabled, autonomy) {
 			fmt.Printf("  authorized: yes — Refined tickets here are picked up for unattended planning\n")
 		} else {
-			fmt.Printf("  authorized: no — needs attended off, the fleet flag on, and planning.autonomy \"lean\" committed on origin/main\n")
+			fmt.Printf("  authorized: no — needs attended off, the fleet flag on, and planning.autonomy \"lean\" committed on origin/<default>\n")
 		}
 	}
 }

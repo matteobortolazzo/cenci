@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
 )
 
 // -- cenci dispatch plan-refined on|off|status (ticket #964) ---------------
@@ -35,14 +37,38 @@ type planRefinedStatusJSON struct {
 // real (non-"unreadable") RepoAutonomy verdict without a network fetch.
 func initRepoWithFetchedAutonomy(t *testing.T, configJSON string) string {
 	t.Helper()
+	return initRepoWithFetchedAutonomyOn(t, configJSON, "main")
+}
+
+// useFakeGhDefaultBranch puts a fake `gh` first on PATH for the binaries this
+// test starts (#1475): `gh api repos/<repo> --jq {default_branch:.default_branch}`
+// prints the `{"default_branch":"<branch>"}` projection, and any other call fails. An empty branch makes the metadata read fail too, so
+// the status surface must report unreadable. It keeps the status tests off the
+// network and off a developer's real gh login.
+func useFakeGhDefaultBranch(t *testing.T, branch string) {
+	t.Helper()
+	dir := t.TempDir()
+	body := "#!/bin/sh\nexit 1\n"
+	if branch != "" {
+		body = "#!/bin/sh\nif [ \"$1\" = api ] && [ \"$3\" = --jq ] && [ \"$4\" = '{default_branch:.default_branch}' ]; then\n  echo '{\"default_branch\":\"" + branch + "\"}'\n  exit 0\nfi\nexit 1\n"
+	}
+	exectest.WriteExecutable(t, filepath.Join(dir, "gh"), body)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// initRepoWithFetchedAutonomyOn is initRepoWithFetchedAutonomy for a remote
+// whose default branch is branch: the config is fetched into
+// refs/remotes/origin/<branch>.
+func initRepoWithFetchedAutonomyOn(t *testing.T, configJSON, branch string) string {
+	t.Helper()
 
 	bareOrigin := filepath.Join(t.TempDir(), "bare-origin")
-	if out, err := exec.Command("git", "init", "--bare", "-b", "main", bareOrigin).CombinedOutput(); err != nil {
+	if out, err := exec.Command("git", "init", "--bare", "-b", branch, bareOrigin).CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare %s: %v\n%s", bareOrigin, err, out)
 	}
 
 	work := t.TempDir()
-	runGit(t, work, "init", "-b", "main")
+	runGit(t, work, "init", "-b", branch)
 	if err := os.MkdirAll(filepath.Join(work, ".cenci"), 0o755); err != nil {
 		t.Fatalf("mkdir .cenci: %v", err)
 	}
@@ -51,10 +77,10 @@ func initRepoWithFetchedAutonomy(t *testing.T, configJSON string) string {
 	}
 	runGit(t, work, "add", ".")
 	runGit(t, work, "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-m", "config")
-	runGit(t, work, "push", bareOrigin, "main")
+	runGit(t, work, "push", bareOrigin, branch)
 
 	repoDir := initGitRemote(t, "git@github.com:owner/name.git")
-	runGit(t, repoDir, "fetch", bareOrigin, "main:refs/remotes/origin/main")
+	runGit(t, repoDir, "fetch", bareOrigin, branch+":refs/remotes/origin/"+branch)
 	return repoDir
 }
 
@@ -96,6 +122,7 @@ func TestDispatchPlanRefinedOnOff_WritesFlagAndPreservesKeys(t *testing.T) {
 }
 
 func TestDispatchPlanRefinedStatus_JSONReportsRepoAutonomy(t *testing.T) {
+	useFakeGhDefaultBranch(t, "main")
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	// A plain directory (not a git repo): the fleet flag still resolves and
@@ -152,6 +179,7 @@ func TestDispatchPlanRefinedStatus_JSONReportsRepoAutonomy(t *testing.T) {
 // combined verdict to false. Never a two-factor verdict that could disagree
 // with `cenci planning attended status`.
 func TestDispatchPlanRefinedStatus_AttendedSuppressesAuthorized(t *testing.T) {
+	useFakeGhDefaultBranch(t, "main")
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	repoDir := initRepoWithFetchedAutonomy(t, `{"planning":{"autonomy":"lean"}}`)
 
@@ -196,6 +224,43 @@ func TestDispatchPlanRefinedStatus_AttendedSuppressesAuthorized(t *testing.T) {
 	}
 	if post.Authorized == nil || *post.Authorized {
 		t.Errorf("authorized = %v, want false now that attended is on (three-factor verdict)", post.Authorized)
+	}
+}
+
+// TestDispatchPlanRefinedStatus_ReadsTheMetadataDefaultBranch covers #1475
+// AC 27 through the CLI: on a repo whose remote default branch is trunk the
+// status reads the config fetched into refs/remotes/origin/trunk (lean, and
+// authorized with the fleet flag on); when the metadata read fails the same repo
+// reports unreadable, never a guess from another ref.
+func TestDispatchPlanRefinedStatus_ReadsTheMetadataDefaultBranch(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	repoDir := initRepoWithFetchedAutonomyOn(t, `{"planning":{"autonomy":"lean"}}`, "trunk")
+	status := func() planRefinedStatusJSON {
+		t.Helper()
+		out, err := exec.Command(binaryPath, "dispatch", "plan-refined", "status", "--config", configPath, "--dir", repoDir, "--json").Output()
+		if err != nil {
+			t.Fatalf("plan-refined status --json: %v\n%s", err, out)
+		}
+		var got planRefinedStatusJSON
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("decoding status JSON: %v\n%s", err, out)
+		}
+		return got
+	}
+
+	useFakeGhDefaultBranch(t, "trunk")
+	if out, err := exec.Command(binaryPath, "dispatch", "plan-refined", "on", "--config", configPath, "--dir", repoDir).CombinedOutput(); err != nil {
+		t.Fatalf("plan-refined on: %v\n%s", err, out)
+	}
+	got := status()
+	if got.RepoAutonomy != "lean" || got.Authorized == nil || !*got.Authorized {
+		t.Errorf("trunk default: repo_autonomy = %q, authorized = %v, want lean and authorized", got.RepoAutonomy, got.Authorized)
+	}
+
+	useFakeGhDefaultBranch(t, "")
+	got = status()
+	if got.RepoAutonomy != "unreadable" || got.Authorized == nil || *got.Authorized {
+		t.Errorf("metadata failure: repo_autonomy = %q, authorized = %v, want unreadable and not authorized", got.RepoAutonomy, got.Authorized)
 	}
 }
 

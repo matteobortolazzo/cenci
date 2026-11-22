@@ -3,7 +3,9 @@ package dispatch
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"time"
 )
@@ -42,6 +44,47 @@ func execGh(args ...string) (stdout, stderr string, err error) {
 	cmd.Stderr = &errBuf
 	err = cmd.Run()
 	return outBuf.String(), errBuf.String(), err
+}
+
+// defaultBranchMaxOutput caps the `default_branch` metadata read: a branch
+// name is at most a few hundred bytes, so anything near this cap is not one.
+const defaultBranchMaxOutput = 4096
+
+// defaultBranchFn is the seam syncMains and QueryRepoAutonomy resolve a repo's
+// default branch through (#1475). Tests swap in a stub so no `gh` call is made.
+var defaultBranchFn = fetchDefaultBranch
+
+// defaultBranchResp is the default-branch probe's --jq-projected shape. A JSON
+// null or a missing key decodes to "": gh's `--jq .default_branch` would print
+// the literal `null` for a JSON null, which `git check-ref-format --branch`
+// accepts, so a bare scalar projection could be read as a branch named "null".
+type defaultBranchResp struct {
+	DefaultBranch string `json:"default_branch"`
+}
+
+// fetchDefaultBranch reads the repository metadata `default_branch` for repo
+// ("owner/name") through the bounded gh helper (#1475): the remote's own answer,
+// never local `origin/HEAD`, a local branch name or local config, so dispatch
+// and babysit agree on one default-branch identity (babysit's own
+// fetchDefaultBranch reads the same field through the same `--jq` object
+// projection). A null, missing or empty value is an error, so the sync reports
+// it as unreadable metadata rather than a branch to fetch. Validating the name
+// as a branch name needs a git repo, so syncMain and QueryRepoAutonomy do that.
+// A failed call or an undecodable answer is an error carrying no gh stderr (a
+// network call's stderr can echo a remote URL).
+func fetchDefaultBranch(repo string) (string, error) {
+	stdout, _, err := execGhBounded(defaultBranchMaxOutput, "api", "repos/"+repo, "--jq", "{default_branch:.default_branch}")
+	if err != nil {
+		return "", fmt.Errorf("gh api repos/%s failed: %w", repo, err)
+	}
+	var resp defaultBranchResp
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		return "", fmt.Errorf("gh api repos/%s returned an undecodable default branch: %w", repo, err)
+	}
+	if resp.DefaultBranch == "" {
+		return "", fmt.Errorf("gh api repos/%s reported no default branch (null, missing or empty)", repo)
+	}
+	return resp.DefaultBranch, nil
 }
 
 // errGhOutputTruncated is execGhBounded's sentinel for a bounded-buffer

@@ -657,7 +657,7 @@ cenci dispatch approve 80
 | `--once` | Run a single dispatch pass then exit (the default when neither `--once` nor `--interval` is given) |
 | `--interval <dur>` | Re-run on this interval (e.g. `5m`); mutually exclusive with `--once` |
 | `--reconcile` | Run one failure-reconciliation pass instead of a dispatch pass (see [Failure reconciliation](#failure-reconciliation)); pair with a cron entry |
-| `--dry-run` | Print the decision (or reconciliation) table and never spawn, edit a label or merge; it still runs the local-main sync's `git fetch` for real (updates each enrolled repo's remote-tracking refs only, so the decision table reflects an accurate gate) — see [Pickup rules and gates](#pickup-rules-and-gates). A dry run never probes tmux: a repo with no `repos[].session` shows `session unconfigured`, and a dispatch into a configured session is noted `session not probed (dry-run)`. **`--dry-run` cannot be combined with `--interval`** (ticket #1464): `cenci dispatch --dry-run --interval 5m` (in any flag spelling) exits `2` before loading config, with `cenci dispatch: --dry-run cannot be combined with --interval (continuous dry-run is not supported); use --dry-run --once for a single preview pass`. `--dry-run --interval 5m --once`, `--reconcile --dry-run --interval 5m` and `--interval 0 --dry-run` each still run a single preview pass |
+| `--dry-run` | Print the decision (or reconciliation) table and never spawn, edit a label or merge; it still runs the default-branch sync's `git fetch` for real (updates each enrolled repo's remote-tracking refs only, so the decision table reflects an accurate gate) but never the `merge --ff-only`; plan staleness then reads `refs/remotes/origin/<default>` where the real pass reads `HEAD` after its fast-forward, giving the same verdict (see [Local main sync](#local-main-sync)) — see [Pickup rules and gates](#pickup-rules-and-gates). A dry run never probes tmux: a repo with no `repos[].session` shows `session unconfigured`, and a dispatch into a configured session is noted `session not probed (dry-run)`. **`--dry-run` cannot be combined with `--interval`** (ticket #1464): `cenci dispatch --dry-run --interval 5m` (in any flag spelling) exits `2` before loading config, with `cenci dispatch: --dry-run cannot be combined with --interval (continuous dry-run is not supported); use --dry-run --once for a single preview pass`. `--dry-run --interval 5m --once`, `--reconcile --dry-run --interval 5m` and `--interval 0 --dry-run` each still run a single preview pass |
 | `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/cenci/config.json`) |
 | `--model <model>` | Model override for every session dispatched this pass — overrides `dispatch.model` and `agents.*.model` in `config.json`. With `--interval`, re-applied on every tick (a config reload can't drop it). |
 
@@ -826,16 +826,19 @@ single pinned object, e.g.
 Because the fleet flag alone never authorizes a planning pickup (#851/#877),
 `status` run inside a git repository (or with `--dir`) also reports that repo's
 half of the grant chain: `repo_autonomy` is the committed `planning.autonomy`
-verdict read at `refs/remotes/origin/main` **as of the last fetch** (the command
-never fetches and, unlike a dispatch pass, does not confirm that ref against the
-remote's current `main` tip, so after a deleted or renamed remote `main` it can still
+verdict read at `refs/remotes/origin/<default>` **as of the last fetch** (`<default>` is
+the repository's `default_branch` from remote metadata, #1475, and a failed or invalid
+metadata read reports `unreadable`, never a guess from a local branch or `origin/HEAD`; the
+command never fetches and, unlike a dispatch pass, does not confirm that
+ref against the remote's current default-branch tip, so after a deleted or renamed remote
+default branch it can still
 read a stale ref; a dispatch pass always fetches and confirms first, so its live
 decision can be fresher and is the only one that authorizes a pickup), and `authorized`
 is the combined verdict — `true` only when the fleet
 flag is on, the fleet-wide [attended mode](#attended-mode-cenci-planning-attended-onoffstatus)
 switch is off, **and** the tracking-ref value is exactly `"lean"`. A directory
 that isn't a git repo omits the repo fields; a repo with no fetched
-`origin/main` ref reports `unreadable`, the same fail-closed verdict the
+`origin/<default>` ref reports `unreadable`, the same fail-closed verdict the
 dispatch gate itself uses. A malformed fleet `planning` block makes `status`
 exit 1 with the error on stderr, same as a malformed `dispatch` block — never a
 silent, confidently-wrong verdict.
@@ -868,7 +871,10 @@ key-preserving write every fleet switch here uses, creating the config file
 — that repo's `planning.autonomy` verdict as of the last fetch, not confirmed
 against the remote (`repo_autonomy`, unnarrowed: this probe always reports the repo's true
 committed value, never the attended-narrowed one; like `dispatch plan-refined
-status` it can lag the dispatch gate), `dispatch.planRefined`
+status` it can lag the dispatch gate; the verdict is read at `refs/remotes/origin/<default>`,
+the remote-metadata default branch, #1475, and the human output labels it `repo autonomy
+(planning.autonomy @ origin/<default>, as of last fetch)` and, when not authorized, asks for
+`planning.autonomy "lean" committed on origin/<default>`), `dispatch.planRefined`
 (`plan_refined`), and the same three-factor combined `authorized` verdict
 `cenci dispatch plan-refined status` prints — the two commands can never
 disagree about whether a repo's pickups would actually fire. `--json` emits
@@ -1001,8 +1007,9 @@ effective filters and the config path in use (see [Enrollment](#enrollment-cenci
 A ticket is dispatched only when **all** of these hold, evaluated in order (the first
 failing gate is the logged skip reason):
 
-1. **local `main` sync** — the ticket's repo's local `main` checkout synced cleanly
-   with `origin/main` this pass (see [Local main sync](#local-main-sync) below);
+1. **local default-branch sync** — the ticket's repo's local checkout of its default branch
+   (the remote-metadata `default_branch`, usually `main`) synced cleanly with
+   `refs/remotes/origin/<default>` this pass (see [Local main sync](#local-main-sync) below);
 1.5. **plan inventory** — the repo's whole `.plans` directory was proven completely
    readable this pass (see [Plan inventory](#plan-inventory) below); an unreadable or
    partially-read directory holds **every** ticket in the repo, ordinary/resume/
@@ -1311,73 +1318,139 @@ forwards no origin marker, so it counts as unattended until it is relaunched.
 #### Local main sync
 
 Before evaluating any ticket, each dispatch pass runs `git fetch origin` and a
-fast-forward-only merge of `origin/main` into `main`, once per enrolled repo — but
-only when the repo's checkout is currently on `main`. This runs unconditionally, even
-on a pass with zero collected tickets, and only ever touches `main` — never `--reset`,
-`--force`, or a branch other than `main`.
+fast-forward-only merge of `refs/remotes/origin/<default>` into the default branch,
+once per enrolled repo — but only when the repo's checkout is currently on that
+branch. This runs unconditionally, even on a pass with zero collected tickets, and
+only ever touches the default branch — never `--reset`, `--force`, `git stash`, a
+checkout, or a branch other than the default. Git hooks stay disabled
+(`core.hooksPath=/dev/null`) and every git call is bounded.
 
-Each repo's sync lands in one of six outcomes:
+**Where `<default>` comes from (#1475).** The default branch is the repository
+metadata `default_branch` (`gh api repos/<owner>/<repo> --jq '{default_branch:.default_branch}'`,
+decoded as JSON, so a null, missing or empty value is `default_branch_unreadable`), read
+once per repo per pass and only for a repo that has a `dir`; this is the same identity
+babysit's merge policy uses. It is never read from the local `origin/HEAD`, a local
+branch name or local config, so a rename of the default branch on the remote
+(`main` to `trunk`) is followed on the next pass. The name is validated before any
+ref is built from it (non-empty, not option-shaped, and `git check-ref-format --branch`
+must accept it and echo it back unchanged). Every sync, staleness and policy read uses
+the **fully qualified** `refs/remotes/origin/<default>`, including the fast-forward
+itself, so a local branch literally named `origin/<default>` can never shadow it.
+`main`, `master` and `trunk` repos are all supported; a repo whose default is `main`
+keeps the exact `not_main`, `detached` and `diverged` statuses and detail strings it
+had before.
+
+Each repo's sync lands in one of eleven outcomes (the status is the `dispatch: main
+sync <repo>: <status> (<detail>)` log line's second field):
 
 - **`MainSyncSkipped`** — no `dir` is configured for the repo at all
   (`dispatch.repos[].dir` is empty). The zero value: "no sync attempted," distinct
   from every state below. Ungated: every ticket in the repo proceeds to the next
   gate.
-- **`MainSyncSynced`** — `main` is now caught up with (or was already at or ahead
-  of) `origin/main`. Ungated: every ticket in the repo proceeds to the next gate.
-- **`MainSyncFetchFailed`** — `git fetch origin` itself failed (network, auth,
-  unresolvable remote). Left ungated for ordinary `Planned` pickup deliberately:
-  transient, and self-heals next pass. #877 changes this for planning pickup and
-  autonomous re-plan specifically — see [Planning pickup and autonomous
+- **`MainSyncSynced`** (`synced`) — the default branch is now caught up with (or was
+  already at or ahead of) `refs/remotes/origin/<default>`. Ungated: every ticket in
+  the repo proceeds to the next gate. A fast-forward that ran logs `fast-forwarded to
+  refs/remotes/origin/<default>`. A fast-forward that succeeds with local edits it does
+  not touch is `synced` and keeps those edits.
+- **`MainSyncFetchFailed`** (`fetch_failed`) — `git fetch origin` itself failed
+  (network, auth, unresolvable remote), **or** it succeeded but the tracking ref
+  `refs/remotes/origin/<default>` is absent or malformed afterwards (the remote lacks
+  the branch; the detail is `tracking ref refs/remotes/origin/<d> absent or malformed
+  after git fetch origin`). **Gated** since #1475, retryable: the skip reason is
+  `default branch fetch failed (retryable)`, and the next pass fetches again. This
+  reverses the earlier behavior (#822), which left a fetch failure ungated for
+  ordinary `Planned` pickup. A network blip now pauses every pickup in that repo for
+  one pass; it self-heals on the next. Planning pickup and autonomous re-plan keep
+  their own distinct retryable reason — see [Planning pickup and autonomous
   re-plan](#planning-pickup-and-autonomous-re-plan)'s "Remote-confirmed
-  authorization" note: a fetch failure this pass holds both with a distinct
-  retryable reason, even though ordinary dispatch in the same repo is
-  unaffected.
-- **`MainSyncNotMain`** — the checkout is currently on a branch other than `main`.
-  **Gated.**
-- **`MainSyncDetached`** — the checkout's `HEAD` is detached (on no branch at all).
-  **Gated.**
-- **`MainSyncMissing`** — a `dir` is configured but that directory does not exist
-  on disk. **Gated.** Distinct from `MainSyncSkipped` (no `dir` configured at all)
-  and from the pre-existing "not a git repository"/diverged/merge-failed
+  authorization" note.
+- **`MainSyncNotMain`** (`not_main`) — the repo's default is `main` and the checkout is
+  currently on another branch. **Gated** (skip reason `local main not on main`).
+- **`MainSyncNotDefault`** (`not_default`) — the repo's default is not `main` and the
+  checkout is on another branch, or on the old default after a rename. The detail names
+  both: `checked-out branch "<b>" is not the default branch "<d>"`. **Gated** (skip
+  reason `local checkout not on the default branch`). The checkout is never switched or
+  renamed. A branch change between the fetch and the fast-forward reports `not_default`
+  (`not_main` for a `main` default) with the detail `checked-out branch changed before
+  merge` and runs no merge.
+- **`MainSyncDetached`** (`detached`) — the checkout's `HEAD` is detached (on no branch
+  at all). **Gated.**
+- **`MainSyncMissing`** (`missing`) — a `dir` is configured but that directory does not
+  exist on disk. **Gated.** Distinct from `MainSyncSkipped` (no `dir` configured at
+  all) and from the pre-existing "not a git repository"/diverged/merge-failed
   `MainSyncFailed`/`MainSyncDiverged` states (also gated, unchanged from before).
+- **`MainSyncDirty`** (`dirty`) — `git merge --ff-only` failed **and** the tracked or
+  untracked changes in the working tree overlap the files the fast-forward would rewrite. The
+  detail is `git merge --ff-only origin/<d> blocked by local changes: <up to 10 XY
+  "path" entries, ... (+N more)>` (a one-line `git status --porcelain` listing; each
+  path is Go-quoted, so a control byte or newline in a file name appears as an escape,
+  and a rename lists both quoted paths joined by ` <- `). **Gated**
+  (skip reason `local default branch has conflicting local changes`). It is classified
+  only after the failed merge, so a fast-forward with non-overlapping edits still
+  succeeds; every other merge failure (a lock file, for one) stays `failed`. Nothing is
+  stashed, reset or discarded: every edited file is byte-identical afterwards.
+- **`MainSyncDefaultBranchUnreadable`** (`default_branch_unreadable`) — the remote
+  default branch name cannot be used: the detail is `remote default branch name is
+  empty`, `remote default branch name "<name>" is not a valid branch name`, or
+  `default branch metadata read failed: <err>`. No fetch runs and nothing is authorized.
+  **Gated** (skip reason `remote default branch unreadable`). The order of checks is
+  dir/stat/repo, then `detached`, then this one, so a missing directory or a detached
+  `HEAD` keeps its own status.
 
-**User-visible behavior change:** `MainSyncNotMain`, `MainSyncDetached`, and
-`MainSyncMissing` gate **every ticket in that repo this pass** — ordinary `Planned`
-pickups included, not only planning pickups or autonomous re-plan. An enrolled repo
-parked on a feature branch, left detached, or whose configured directory has gone
-missing from disk used to keep dispatching ordinary `Planned` tickets normally; it
-no longer does — it is skipped exactly like the pre-existing `MainSyncDiverged`/
-`MainSyncFailed` gated states. Rationale: plan freshness and the pipeline-stage gate
-below are both computed against the local tree, so a checkout state that isn't
-trustworthy for the sync itself isn't trustworthy for any other pickup either — see
-gate 1 in [Pickup rules and gates](#pickup-rules-and-gates).
+`MainSyncDiverged` (`diverged`) and `MainSyncFailed` (`failed`) remain gated, as
+before.
 
-This gate is scoped to `main` only — repos whose default branch isn't literally named
-`main` are never synced or gated by this rule. `--dry-run` still performs the real
-`git fetch` and classification (an accurate decision table needs it) but never runs
-the merge itself.
+**User-visible behavior change:** `MainSyncNotMain`, `MainSyncNotDefault`,
+`MainSyncDetached`, `MainSyncMissing`, `MainSyncDirty`,
+`MainSyncDefaultBranchUnreadable` and `MainSyncFetchFailed` gate **every ticket in that
+repo this pass** — ordinary `Planned` pickups included, not only planning pickups or
+autonomous re-plan. An enrolled repo parked on a feature branch, left detached, with a
+dirty fast-forward, or whose configured directory has gone missing from disk used to
+keep dispatching ordinary `Planned` tickets normally; it no longer does — it is skipped
+exactly like the pre-existing `MainSyncDiverged`/`MainSyncFailed` gated states.
+Rationale: plan freshness and the pipeline-stage gate below are both computed against
+the local tree, so a checkout state that isn't trustworthy for the sync itself isn't
+trustworthy for any other pickup either — see gate 1 in [Pickup rules and
+gates](#pickup-rules-and-gates). Only `MainSyncSkipped` and `MainSyncSynced` are
+ungated.
 
-**Dry-run staleness parity.** When a fast-forward is pending (local `main` is
-strictly behind `origin/main`), dry-run and the subsequent real pass share one
-resolved `FreshRef` per repo per pass: the fetched `origin/main` blob rather than
-local `HEAD`. Both plan staleness (gate 4 in [Pickup rules and
-gates](#pickup-rules-and-gates)) and the repo-local lean-authorization config read
-(below) are evaluated against that same `FreshRef`, so a dry-run's rendered
+**Unsupported: non-`main` defaults past the dispatcher-to-plan-check boundary.** The
+dispatcher resolves one default branch and uses it for the sync, plan staleness and the
+autonomy policy read, so a `master` or `trunk` repo is picked up and checked correctly
+through the plan check. That is as far as non-`main` support goes: this is not general
+non-`main` pipeline support. The flow implement phases that run after a pickup still
+assume `main` and are not changed here: `flow/skills/implement/phases/phase-6-7-review.md`,
+`phase-8-docs.md` and `phase-9-pr.md` diff and compare against `origin/main`, and
+`flow/skills/review/SKILL.md` falls back to `git diff main...HEAD`. On a repo whose
+default branch has another name those steps fail or compare against the wrong base. Local-mode wiring and its
+end-to-end tests belong to #1026. `--dry-run` still performs the real `git fetch` and
+classification (an accurate decision table needs it) but never runs the merge itself.
+
+**Dry-run staleness parity.** When a fast-forward is pending (the local default branch
+is strictly behind `refs/remotes/origin/<default>`), dry-run and the subsequent real
+pass share one resolved `FreshRef` per repo per pass, and reach the same freshness
+verdict: the dry run reads the fetched `refs/remotes/origin/<default>` (its detail is
+`would fast-forward origin/<d> (dry-run, not merged)`), and the real pass reads local
+`HEAD` after its fast-forward, the same commit. Both plan staleness (gate 4 in [Pickup
+rules and gates](#pickup-rules-and-gates)) and the repo-local lean-authorization config
+read (below) are evaluated against that same `FreshRef`, so a dry-run's rendered
 decision table matches exactly what the subsequent real (fast-forwarded) pass would
-produce. In every other outcome — already up to date, local `main` ahead, or any
-gated state — `FreshRef` is `HEAD`.
+produce. In every other outcome — already up to date, local default branch ahead, or
+any gated state — `FreshRef` is `HEAD`.
 
 **Authorization-ref parity (#877, #903).** `AutonomyRef` is a separate per-repo value
 from `FreshRef`, resolved once per pass alongside it: the **confirmed object ID** of the
-remote's `main` tip, non-empty if and only if this pass's `git fetch origin` succeeded
-**and** `refs/remotes/origin/main` equals what `git ls-remote --exit-code origin
-refs/heads/main` reports (a successful fetch alone does not prove the tracking ref
-moved: a deleted or renamed remote `main` leaves it stale, and a non-standard
-`remote.origin.fetch` may never update it). It is empty on every pre-fetch or
-fetch-failed path and whenever the remote tip cannot be confirmed — `ls-remote`
-failing, the remote not advertising `main`, a mismatch, or a push landing between the
-fetch and the `ls-remote` (a one-pass denial; the next pass confirms) — and the repo
-then resolves `fetch_unconfirmed`, with the reason in its `repo autonomy` log line.
+remote's default-branch tip, non-empty if and only if this pass's `git fetch origin`
+succeeded **and** `refs/remotes/origin/<default>` equals what `git ls-remote
+--exit-code origin refs/heads/<default>` reports (a successful fetch alone does not
+prove the tracking ref moved: a deleted or renamed remote default branch leaves it
+stale, and a non-standard `remote.origin.fetch` may never update it). It is empty on
+every pre-fetch or fetch-failed path and whenever the remote tip cannot be confirmed —
+`ls-remote` failing, the remote not advertising the branch, zero or several lines or a
+malformed object ID, a mismatch, or a push landing between the fetch and the
+`ls-remote` (a one-pass denial; the next pass confirms) — and the repo
+then resolves `fetch_unconfirmed`, with the reason in its `repo autonomy` log line (the
+sync status itself is unaffected by an unconfirmed tip).
 Unlike `FreshRef`, `AutonomyRef` never falls back to local `HEAD` — the repo-local
 lean-authorization config read (below) always reads at `AutonomyRef`, so it is
 identical between a dry-run pass and its subsequent real pass (the fetch and the
@@ -1658,7 +1731,7 @@ dependency gate](#ticket-dependency-gate) above.
 switch, but it is no longer sufficient authorization on its own (#851): after the
 local main sync above, dispatch also reads the repo's own committed
 `.cenci/config.json` at the remote-confirmed `AutonomyRef` (via `git show
-<confirmed-oid>:.cenci/config.json`, where the OID is the remote's `main` tip confirmed
+<confirmed-oid>:.cenci/config.json`, where the OID is the remote default branch's tip confirmed
 this pass; never local `HEAD` and never the working tree) and requires the literal value `planning.autonomy == "lean"`
 before treating a planning pickup or autonomous re-plan as authorized. A
 missing, unreadable, malformed, or non-`"lean"` repo config denies both with its
@@ -1674,23 +1747,28 @@ naming attended mode as the cause — for when a human is sitting at this
 machine's keyboard and could just answer a clarifying question instead.
 
 **Remote-confirmed authorization (#877, #903).** The config read above requires a
-successful `git fetch origin` in *this pass* and a remote `main` tip confirmed
+successful `git fetch origin` in *this pass* and a remote default-branch tip confirmed
 against `git ls-remote` (see "Authorization-ref parity (#877, #903)" above) — it is never read from local
-`HEAD`, and a repo whose local `main` checkout is ahead of `origin/main` with
+`HEAD`, and a repo whose local default-branch checkout is ahead of
+`origin/<default>` with
 unpushed commits cannot use its own unpushed config to grant (or revoke)
 authorization; only the fetched remote object counts. Symmetrically, a lean
-grant that was revoked on the remote (`origin/main`'s config no longer says
+grant that was revoked on the remote (`origin/<default>`'s config no longer says
 `"lean"`) is honored immediately, even if the local checkout's last successful
 pass still has `"lean"` cached in its working tree or `HEAD`. **User-visible
 behavior change:** when `git fetch origin` fails this pass
-(`MainSyncFetchFailed` above), or the remote's `main` was deleted, renamed or
+(`MainSyncFetchFailed` above), or the remote's default branch was deleted, renamed or
 otherwise cannot be confirmed (#903, see the Authorization-ref parity paragraph
 above), planning pickup and autonomous re-plan are held
-with a distinct retryable reason and launch nothing for that repo — where they
+with a distinct retryable reason (`remote main not fetched this pass (retryable)`; the
+literal still says `main` whichever branch is the default) and launch nothing for that
+repo — where they
 previously fell back to whatever `planning.autonomy` local `HEAD` last had
-committed. Ordinary `Planned` pickup in the same repo is unaffected by the same
-fetch failure; only freshness-dependent planning/re-plan authorization is gated
-by it.
+committed. Since #1475 a failed fetch also gates ordinary `Planned` pickup in the same
+repo with its own reason, `default branch fetch failed (retryable)` (see [Local main
+sync](#local-main-sync)); an unconfirmed remote tip alone (the fetch succeeded, the
+`ls-remote` confirmation did not) leaves ordinary `Planned` pickup unaffected, and
+only freshness-dependent planning/re-plan authorization is gated by it.
 
 **Trust boundary (#847).** A planning pickup or autonomous re-plan launches an
 unattended session whose primary input is the ticket's own body/comment text, so
@@ -2613,7 +2691,9 @@ naming the exact host command) and sends nothing over the event socket; no socke
 or daemon handler carries it. On the host it zeroes `ciFixAttempts`, `ciRepairPending`,
 `lastRepairedCiHeadSha`, `conflictFixAttempts` and `conflictNotifiedHeadSha` (for both
 budgets, whatever the launch reason) and clears the CI-cap markers `ciRepairPaused` and
-`ciCapNotified` and the launch-tracking marker `ciRepairTracked`. It keeps the feedback bookkeeping
+`ciCapNotified`, the launch-tracking marker `ciRepairTracked` and the behind-branch update
+record `branchUpdate` (#1475; nine fields in all), which re-arms an exhausted or unsupported
+update. It keeps the feedback bookkeeping
 (`addressedCommentKeys`, `pendingCommentKeys`, `launchedFeedbackKeys`,
 `lastCommentTimestamp`) and `conflictRepairHeadSha`. A live supervisor is sent SIGTERM,
 awaited for up to 10s and its lock removed first. A recorded PID that is no longer
@@ -2867,9 +2947,12 @@ empty state: the stop is refused with a fixed reason and the file is kept.
   truncated read holds it under the reasons above.
 - The PR is not a draft and GitHub reports it `MERGEABLE`. A conflicting PR
   (`mergeStateStatus` `DIRTY`) holds under `PR has merge conflicts`; a branch
-  merely behind its base (`mergeStateStatus` `BEHIND`) holds under `PR branch is
-  behind base`; any other non-`MERGEABLE`/unrecognized state falls back to the
-  generic `PR not mergeable`.
+  behind its base (`mergeStateStatus` `BEHIND`) holds under `PR branch is
+  behind base`, even when `mergeable` is `MERGEABLE` (#1475; a green behind PR used
+  to reach `gh pr merge`); any other non-`MERGEABLE`/unrecognized state falls back to
+  the generic `PR not mergeable`. The hold does not wait for a human: the supervisor
+  updates a clean `BEHIND` PR itself (see "Behind-branch update" below) and the hold
+  clears when the new head settles.
 - The PR doesn't require a merge queue or other deferred-merge handling — a
   GraphQL probe (`isInMergeQueue`/`isMergeQueueEnabled`) checked as the final
   gate before mutation. Required, already-queued, or unreadable/unknown queue
@@ -2906,6 +2989,41 @@ defers CI and review repair dispatch during the conflict episode. After three re
 an unresolved conflict opens a deduplicated `babysit-attention` window and sets
 `Status = "needs-input"`; polling continues so a later confirmed conflict-free state
 releases the hold and resets the budget. Unknown mergeability never resets that budget.
+
+**Behind-branch update (#1475).** A clean `BEHIND` PR (`mergeable` `MERGEABLE`,
+`mergeStateStatus` `BEHIND`) with no live branch writer is caught up by `cenci babysit`
+once per observed (head, base) pair, with one server-side, non-force update: the GraphQL
+`updatePullRequestBranch` mutation with `updateMethod: MERGE` and `expectedHeadOid` set to
+the head the tick observed, so a push by someone else in between is rejected by the
+server and never merged over. It is never a rebase, a force-push, a reset or a stash, and
+it never writes `automerge:ok` or any other merge grant; it runs with `automerge.enabled`
+on or off (a PR updated with automerge off is never merged). The PR then waits on the
+checks and feedback of the new head (no merge while any check is `pending`), and the
+pre-merge recheck re-reads the head (`--match-head-commit` pin), CI buckets, feedback,
+policy and the per-ticket grant on that new head. Around it:
+
+- **Conflicts** (`DIRTY`) get zero update calls and go to the bounded `merge-repair`
+  episode above, whether the conflict was there first or appeared after an update.
+- **Writers.** A live `<PR>-ci-repair`, `<PR>-merge-repair`, `<PR>-babysit-review` or
+  `<PR>-address-review` window, or a capacity-ledger branch-writer entry for the
+  PR's branch, defers the update (`PR #<pr>: branch update deferred: <writer> active`).
+  It consumes nothing and is retried on the next tick.
+- **Failures.** A rejected update, a `gh` or API error or a timeout is one failed
+  attempt (`branch update failed (attempt N of 3): <reason>`). There is no retry at the
+  same (head, base) pair, across polls or restarts; a new base starts one new attempt.
+  `UNKNOWN` mergeability, a failed read and an update whose re-read head is unchanged
+  record no `updated` and consume no attempt. After three consecutive failed attempts
+  the PR holds with `input needed: branch update attempts exhausted`.
+- **Unsupported.** A cross-repository (fork) PR, a PR in a merge queue and an update
+  refused by branch protection (a GraphQL `FORBIDDEN`) make no further attempt and hold
+  with `input needed: branch update unsupported (<reason>)`, where `<reason>` is
+  `cross-repository PR`, `merge queue` or `branch protection`.
+- **Recovery.** Both holds set status `needs-input`, open one `babysit-attention`
+  notice and are sticky across restarts and `cenci babysit stop`. The detail ends
+  `; update the PR branch yourself, then cenci babysit reset <pr> re-arms the branch
+  update`: update the branch yourself, then run `cenci babysit reset <pr>`, which
+  clears the record (a ninth field beside the repair budgets) and re-arms the
+  update. Full rules: `watch/docs/babysit.md` ("Behind-branch update").
 
 CI repair has its own, separate budget, also capped at `fixCap` (3). A worker that
 ended without the checks going green is retried at the same head, one launch per tick,
