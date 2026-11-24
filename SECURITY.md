@@ -225,6 +225,19 @@ That volume persists across container restarts (by design, so you don't re-auth 
 session) but also means copied credentials live on disk in the volume until you remove
 it.
 
+The native Claude Code and Codex CLIs need a readable credential inside the container, so
+any process running as the sandbox user, repository code included, can read the login in
+the home volume, the staged host files (`/tmp/host-claude-creds/.credentials.json`,
+`/tmp/host-codex-creds/auth.json`, mounted for the container's whole lifetime) and any
+token forwarded to the agent's environment. The read-only staging prevents container code
+from modifying the host file but does not prevent it from reading it. A process that reads
+the staged host file could redeem its refresh token, which may fork or revoke the host
+login if the provider rotates tokens and detects reuse (unverified; see the report's
+Unresolved items). Whether a copied
+login becomes an independent token chain is unverified for both providers; see
+[sandbox/docs/host-auth-lifecycle.md](./sandbox/docs/host-auth-lifecycle.md) for the
+evidence, the remaining-access finding and the open questions.
+
 To remove a volume and everything copied into it:
 
 ```bash
