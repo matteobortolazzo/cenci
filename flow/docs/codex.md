@@ -403,18 +403,16 @@ before its first checkpoint write.
   `COMMAND<TAB><n><TAB>printf x > '<target>'` line with the target single-quoted (an embedded `'`
   is written `'\''`), and the session runs that line verbatim, so a repository path with spaces
   or shell metacharacters creates no stray file.
-- **Expected denials.** A planned main-worktree canary probe is intentionally denied. The
-  guard's diagnostic gives conditional guidance: record `denied`, complete all remaining
-  planned probes, then run `guard-canary.sh check`; proceed only on `CANARY_STATUS=active`.
-  Never retry, relocate or bypass a planned probe, or manufacture a success. A canary-shaped
-  filename alone proves neither a receipt nor a successful preflight. For accidental
-  main-worktree writes, the diagnostic retains the feature-worktree remediation below that
-  conditional guidance; it does not change any guard decision or receipt requirement.
+- **Expected denials.** Codex displays “Blocked by hook” for each planned denial.
+  Once the guard records its receipt, the diagnostic begins with “Expected guard check”.
+  Record `denied`, complete the remaining planned probes and run `guard-canary.sh check`.
+  Proceed only on `CANARY_STATUS=active`. Never retry or relocate a planned probe.
+  Ordinary denied writes receive the guard's usual remediation.
 - **Guard receipts.** When a guard blocks a canary-shaped probe target, it writes a guard
   receipt into the run directory: `V1`, the guard, the run id, the probe number and the tool
   name, never the command or the diff. It writes one only when the run directory's `probes.tsv`
   lists that probe for that guard, so `plan`'s own self-check can never leave one, and a receipt
-  failure never changes the guard's exit code, message or decision. The run directory must be
+  failure leaves the write denied with the ordinary diagnostic. The run directory must be
   a real directory owned by you and not group- or world-writable.
 - **Verdict.** The session makes one tool call per probe and reports one verdict token per
   probe, then runs `check <run-dir> <n>=denied|not-denied|blocked|not-attempted…`: `denied`

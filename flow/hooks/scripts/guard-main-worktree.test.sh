@@ -3306,18 +3306,6 @@ rg_assert_one_receipt() {
     fi
 }
 
-# Guidance is conditional prose: neither a canary-shaped filename nor this
-# message proves a receipt or a successful preflight. Ordinary writes still
-# receive their feature-worktree remediation.
-assert_canary_guidance() {
-    assert_stderr_has "$1" "If this is a planned guard-canary.sh probe, this denial is expected."
-    assert_stderr_has "$1" "Record denied, complete all remaining planned probes, then run guard-canary.sh check."
-    assert_stderr_has "$1" "Proceed only on CANARY_STATUS=active."
-    assert_stderr_has "$1" "Never retry, relocate or bypass a planned probe, or manufacture a success."
-    assert_stderr_has "$1" "Otherwise, for an accidental main-worktree write:"
-    assert_stderr_lacks "$1" "THE ONLY CORRECT FIX"
-}
-
 echo "case: ordinary Write/Edit and Bash denials retain feature-worktree remediation"
 for rg_shape in write edit shell; do
     rg_run "${RG_TMP}" "$(rg_json "${rg_shape}" "${RG_ROOT}/src/ordinary.txt")"
@@ -3328,7 +3316,7 @@ for rg_shape in write edit shell; do
     else
         assert_stderr_has "ordinary ${rg_shape} remediation" "re-issue the SAME Write/Edit with an absolute path rooted"
     fi
-    assert_canary_guidance "ordinary ${rg_shape} conditional guidance"
+    assert_stderr_lacks "ordinary ${rg_shape}" "Expected guard check"
 done
 
 for rg_case in "shell|4|Bash|${RG_TMP}" "apply_patch|2|apply_patch|${RG_TMP}" "write|2|Write|${RG_TMP}" "edit|2|Edit|${RG_TMP}" "shell|4|Bash|${RG_TMP}/"; do
@@ -3340,10 +3328,11 @@ for rg_case in "shell|4|Bash|${RG_TMP}" "apply_patch|2|apply_patch|${RG_TMP}" "w
     rg_j="$(rg_json "${rg_shape}" "${rg_target}")"
     rg_run "${rg_tmpdir}" "${rg_j}"
     rg_assert_one_receipt "receipt (${rg_shape}, TMPDIR ${rg_tmpdir})" "${RG_RUN}" "${RG_HEX}" "${rg_n}" "${rg_tool}" "${rg_target}"
-    assert_canary_guidance "planned ${rg_shape} probe"
+    assert_stderr_has "planned ${rg_shape} probe" "Expected guard check"
     rm -rf "${RG_RUN}"
-    rg_parity "receipt (${rg_shape}, TMPDIR ${rg_tmpdir})" "${rg_tmpdir}" "${rg_j}"
-    assert_canary_guidance "${rg_shape} canary-shaped filename without a run directory"
+    rg_run "${rg_tmpdir}" "${rg_j}"
+    assert_exit "unlisted ${rg_shape} target" 2
+    assert_stderr_lacks "unlisted ${rg_shape} target" "Expected guard check"
 done
 
 echo "case: with no run dir under TMPDIR the receipt goes to the /tmp run dir, and TMPDIR wins when both exist (#1411)"
@@ -3366,7 +3355,9 @@ else
     fail "TMPDIR precedence: the /tmp run dir must get no receipt when TMPDIR holds the run dir"
 fi
 rm -rf "${RG_TMP}/cenci-guard-canary-${RG_SYS_HEX}" "${RG_SYS_RUN}"
-rg_parity "/tmp fallback" "${RG_TMP}" "${rg_j}"
+rg_run "${RG_TMP}" "${rg_j}"
+assert_exit "removed run directory" 2
+assert_stderr_lacks "removed run directory" "Expected guard check"
 
 echo "case: a denial unrelated to the canary leaves no receipt and no run-dir entry anywhere (#1411)"
 rg_new_run
@@ -3484,7 +3475,9 @@ else
 fi
 chmod 700 "${RG_RUN}"
 rm -rf "${RG_RUN}"
-rg_parity "read-only run dir" "${RG_TMP}" "${rg_j}"
+if [[ "$(id -u)" != 0 ]]; then
+    rg_parity "read-only run dir" "${RG_TMP}" "${rg_j}"
+fi
 
 # A same-user session can plant its own canary-shaped run dir (it passes every
 # hardening check) with a huge or sparse probes.tsv. The guard must not read it

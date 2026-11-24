@@ -4809,9 +4809,7 @@ model-switch lines. Both are display-only: nothing in them is read by dispatch.
 A Codex session whose hooks arrive but whose tmux pane could not be proven (a stale pane
 from a shared app-server, a server pid that does not match, an older `notify` binary
 that sends no pid, or no process-ancestry proof that a single-client Codex runs in that
-pane) stays listed without a window and carries a hint line under it. Today no marker
-tells the shared app-server from a client, so every host Codex session in tmux needs
-`cenci bind`:
+pane) stays listed without a window and carries a hint line under it.
 
 ```console
   (no session) - implement thing (codex) (running)
@@ -4926,10 +4924,9 @@ daemon only attaches a Codex hook pane when the pane is listed on its socket und
 same tmux server pid and the hook's process ancestry proves a single-client Codex in
 that pane (`cenci notify` sends only the ancestry's pids and one boolean); otherwise the
 session stays listed without a window (see
-[Human status overview](#human-status-overview-cenci-status)). No shared app-server
-marker is recorded yet because Codex hook input carries no client identity, so the
-ancestry proof never succeeds on host tmux today and `cenci bind` is required for every
-host Codex session. `cenci bind` pins it by hand:
+[Human status overview](#human-status-overview-cenci-status)).
+On Linux, launch `codex --no-daemon` in the pane for automatic association.
+For an existing shared-server session, run `cenci bind` from its own pane.
 
 ```bash
 # In the tmux pane that shows the Codex session

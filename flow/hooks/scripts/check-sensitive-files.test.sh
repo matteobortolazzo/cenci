@@ -1476,7 +1476,11 @@ for rcpt_case in "shell|3|Bash|bash" "apply_patch|1|apply_patch|write-edit"; do
         pass
     fi
     rm -rf "${RCPT_RUN}"
-    rcpt_parity "receipt (${rc_shape})" "${rc_json}"
+    run_check_in_dir "${APPLY_PATCH_DIR}" "${rc_json}"
+    assert_exit "unlisted ${rc_shape} target" 2
+    if [[ "${CHECK_STDERR}" != *"Edit manually"* || "${CHECK_STDERR}" == *"Expected guard check"* ]]; then
+        fail "unlisted ${rc_shape} target should receive the ordinary environment file guidance"
+    fi
 done
 
 echo "case: a denial unrelated to the canary leaves no receipt and no run-dir entry anywhere (#1411)"
@@ -1613,7 +1617,9 @@ else
 fi
 chmod 700 "${RCPT_RUN}"
 rm -rf "${RCPT_RUN}"
-rcpt_parity "read-only run dir" "${rc_json}"
+if [[ "$(id -u)" != 0 ]]; then
+    rcpt_parity "read-only run dir" "${rc_json}"
+fi
 
 # A same-user session can plant its own canary-shaped run dir (it passes every
 # hardening check) with a huge or sparse probes.tsv. The guard must not read it
