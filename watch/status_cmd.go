@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -110,10 +111,14 @@ func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
 		fmt.Fprintf(&b, "sessions: none\n")
 	default:
 		fmt.Fprintf(&b, "sessions (%d):\n", len(snap.Windows))
+		unprovenCodex := false
 		for _, w := range snap.Windows {
 			fmt.Fprintf(&b, "  %s\n", status.FormatSessionLine(w, status.Identity))
 			if w.Association == watch.AssociationUnproven {
 				fmt.Fprintf(&b, "    %s\n", bindHint(w.SessionID))
+				if w.Agent == "codex" {
+					unprovenCodex = true
+				}
 			}
 			for _, sw := range w.ModelSwitches {
 				// The snapshot comes from a socket, so the values are
@@ -128,6 +133,9 @@ func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
 			if w.NativeMeasurement != nil {
 				renderNativeLines(&b, w.NativeMeasurement, now)
 			}
+		}
+		if unprovenCodex && runtime.GOOS == "linux" {
+			b.WriteString("For automatic pane detection in a new tmux session, launch 'codex --no-daemon'.\n")
 		}
 	}
 

@@ -436,6 +436,9 @@ deny_probes() {
             if [[ "${G_RC}" -ne "${want}" ]]; then
                 fail "deny_probes: probe ${n} (${tool}): ${g} exited ${G_RC}, want ${want}: ${G_ERR:0:160}"
             fi
+            if [[ "${want}" == 2 && ( "${G_ERR}" != "Expected guard check "* || "${G_ERR}" == *$'\n'* ) ]]; then
+                fail "probe ${n} (${tool}): expected one line identifying the planned check, got: ${G_ERR:0:160}"
+            fi
         done
     done
 }

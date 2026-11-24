@@ -22,6 +22,11 @@ hint: hooks were delivered but no tmux association is proven; run 'cenci bind <i
 
 The snapshot keys are additive. `cenci widget-json` prints its own `status.output` and never embeds `WindowState`, so its shape is unchanged.
 
+On Linux, when the report includes an unproven Codex session, it also suggests
+`codex --no-daemon` once for future interactive tmux launches. This lets the
+hook inherit the pane of the client that started it while the shared server
+continues to serve its existing sessions.
+
 ## The server-pid rule
 
 A pane is attached only when the live tmux server is the one the event came from. `notify` sends the second field of `$TMUX` as `tmux_server_pid`; the daemon compares it with `#{pid}` from the same `list-panes -F` listing that proves the pane exists, so there is no extra tmux call. A listed pane with no server pid counts as a mismatch.

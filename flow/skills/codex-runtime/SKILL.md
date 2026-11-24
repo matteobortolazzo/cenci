@@ -46,6 +46,9 @@ user-invocable: false
   The helper prints one `PROBE` line
   per (matcher group, guard) pair of `codex/hooks.json` (four today), one `COMMAND` line per shell
   probe, plus `INSTRUCTION:` lines.
+  Before the first probe, tell the user that Codex will display one expected
+  “Blocked by hook” entry per probe while checking write protection. Report
+  the final `CANARY_STATUS` after `check`.
   Make exactly the listed tool calls (a shell probe runs its `COMMAND` line verbatim, already
   single-quoted), judge each from its own tool result (`denied` only when the guard's message shows;
   `blocked` when Codex's sandbox or approval policy refused the call before any guard answered;

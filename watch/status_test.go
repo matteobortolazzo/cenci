@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1259,6 +1260,13 @@ func TestStatusSubcommand_HumanReadable_UnprovenCodexShowsBindHint(t *testing.T)
 	}
 	if n := strings.Count(output, "hint: "); n != 2 {
 		t.Errorf("%d hint lines, want one per unproven session:\n%s", n, output)
+	}
+	wantAdvice := 0
+	if runtime.GOOS == "linux" {
+		wantAdvice = 1
+	}
+	if got := strings.Count(output, "codex --no-daemon"); got != wantAdvice {
+		t.Errorf("expected launch guidance %d times, got %d:\n%s", wantAdvice, got, output)
 	}
 	for _, marker := range []string{"bound work", "claude work"} {
 		if got := lineAfter(t, output, marker); strings.Contains(got, "hint:") {

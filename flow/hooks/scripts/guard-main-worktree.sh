@@ -880,10 +880,9 @@ fi
 
 # Guard canary receipt (#1411): evidence for flow/codex/guard-canary.sh check
 # that THIS guard denied one of the canary's probes. Called only at the two
-# "targets the main worktree" denies below, always as
-# `( canary_receipt <canonical-path> ) </dev/null >/dev/null 2>&1`: a subshell
-# with every stream detached, so it can never change this hook's exit code,
-# stderr, stdout or decision, and every failure is swallowed. It writes only
+# "targets the main worktree" denials below.
+# The caller uses success only to select the planned probe's diagnostic.
+# Every outcome denies the write. It writes only
 # when <path>'s leaf is cenci-guard-canary-<16 lowercase hex>-<n>.txt and the
 # run dir cenci-guard-canary-<hex> exists under ${TMPDIR%/} (absolute TMPDIR
 # only), else under /tmp -- the order guard-canary.sh plan picks its base in. A
@@ -903,19 +902,19 @@ canary_receipt() {
   _cr_target="$1"
   case "$_cr_target" in
     /*) ;;
-    *) return 0 ;;
+    *) return 1 ;;
   esac
   _cr_leaf="${_cr_target##*/}"
   case "$_cr_leaf" in
     cenci-guard-canary-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-*.txt) ;;
-    *) return 0 ;;
+    *) return 1 ;;
   esac
   _cr_rest="${_cr_leaf#cenci-guard-canary-}"
   _cr_hex="${_cr_rest%%-*}"
   _cr_n="${_cr_rest#*-}"
   _cr_n="${_cr_n%.txt}"
   case "$_cr_n" in
-    "" | *[!0-9]*) return 0 ;;
+    "" | *[!0-9]*) return 1 ;;
   esac
   _cr_run=""
   _cr_tmp="${TMPDIR:-}"
@@ -928,13 +927,13 @@ canary_receipt() {
       ;;
   esac
   [ -n "$_cr_run" ] || _cr_run="/tmp/cenci-guard-canary-$_cr_hex"
-  { [ -d "$_cr_run" ] && [ ! -L "$_cr_run" ] && [ -O "$_cr_run" ]; } || return 0
-  _cr_mode=$(ls -ld "$_cr_run") || return 0
+  { [ -d "$_cr_run" ] && [ ! -L "$_cr_run" ] && [ -O "$_cr_run" ]; } || return 1
+  _cr_mode=$(ls -ld "$_cr_run") || return 1
   case "$_cr_mode" in
-    ?????w* | ????????w*) return 0 ;;
+    ?????w* | ????????w*) return 1 ;;
   esac
   _cr_pf="$_cr_run/probes.tsv"
-  { [ -f "$_cr_pf" ] && [ ! -L "$_cr_pf" ]; } || return 0
+  { [ -f "$_cr_pf" ] && [ ! -L "$_cr_pf" ]; } || return 1
   # Bounded read: this runs before the deny's exit 2, and a same-user session
   # can plant its own run dir (it passes every check above) with a huge or
   # sparse probes.tsv. An unbounded read loop would stall the hook until it
@@ -945,14 +944,14 @@ canary_receipt() {
   # in after the -f test blocks the open itself; that needs the same user and
   # only hangs this hook, which is no worse than that user killing it.
   _cr_cap=16384
-  _cr_size=$(wc -c < "$_cr_pf") || return 0
+  _cr_size=$(wc -c < "$_cr_pf") || return 1
   _cr_size="${_cr_size#"${_cr_size%%[0-9]*}"}"
   _cr_size="${_cr_size%"${_cr_size##*[0-9]}"}"
   case "$_cr_size" in
-    "" | *[!0-9]* | ??????*) return 0 ;;
+    "" | *[!0-9]* | ??????*) return 1 ;;
   esac
-  [ "$_cr_size" -le "$_cr_cap" ] || return 0
-  _cr_data=$(head -c "$_cr_cap" "$_cr_pf") || return 0
+  [ "$_cr_size" -le "$_cr_cap" ] || return 1
+  _cr_data=$(head -c "$_cr_cap" "$_cr_pf") || return 1
   _cr_tab=$(printf '\t')
   _cr_hex_ok=0
   _cr_listed=0
@@ -970,14 +969,13 @@ canary_receipt() {
   done <<CR_PROBES_EOF
 $_cr_data
 CR_PROBES_EOF
-  [ "$_cr_hex_ok" = 1 ] && [ "$_cr_listed" = 1 ] || return 0
-  _cr_tool=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""') || return 0
+  [ "$_cr_hex_ok" = 1 ] && [ "$_cr_listed" = 1 ] || return 1
+  _cr_tool=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""') || return 1
   case "$_cr_tool" in
-    "" | *[!A-Za-z0-9_]*) return 0 ;;
+    "" | *[!A-Za-z0-9_]*) return 1 ;;
   esac
-  _cr_file=$(mktemp "$_cr_run/receipt-guard-main-worktree-$_cr_n.XXXXXX") || return 0
+  _cr_file=$(mktemp "$_cr_run/receipt-guard-main-worktree-$_cr_n.XXXXXX") || return 1
   printf 'V1\tguard-main-worktree\t%s\t%s\t%s\n' "$_cr_hex" "$_cr_n" "$_cr_tool" > "$_cr_file"
-  return 0
 }
 
 # bash_target_allowed <canonical-path> -- the same allowlist/TMPDIR-widening
@@ -1111,16 +1109,13 @@ if [ -n "$FILE_PATH" ]; then
   fi
 
   # Everything else is a main-worktree write → block with guidance.
-  ( canary_receipt "$FILE_PATH" ) </dev/null >/dev/null 2>&1
+  if ( canary_receipt "$FILE_PATH" ) </dev/null >/dev/null 2>&1; then
+    echo "Expected guard check — test write targets the main worktree." >&2
+    exit 2
+  fi
   {
     echo "BLOCKED: Write to $FILE_PATH targets the main worktree, not a feature worktree."
     echo ""
-    echo "If this is a planned guard-canary.sh probe, this denial is expected."
-    echo "Record denied, complete all remaining planned probes, then run guard-canary.sh check."
-    echo "Proceed only on CANARY_STATUS=active."
-    echo "Never retry, relocate or bypass a planned probe, or manufacture a success."
-    echo ""
-    echo "Otherwise, for an accidental main-worktree write:"
     echo "re-issue the SAME Write/Edit with an absolute path rooted"
     echo "at the feature worktree — under .worktrees/<id>-<desc>/, keeping the path tail"
     echo "identical. If you don't know the worktree path, run 'git worktree list' and"
@@ -1591,16 +1586,13 @@ elif [ -n "$TOOL_COMMAND" ]; then
     fi
 
     if ! bash_target_allowed "$BWT_CANON"; then
-      ( canary_receipt "$BWT_CANON" ) </dev/null >/dev/null 2>&1
+      if ( canary_receipt "$BWT_CANON" ) </dev/null >/dev/null 2>&1; then
+        echo "Expected guard check — test write targets the main worktree." >&2
+        exit 2
+      fi
       {
         echo "BLOCKED: Bash write to $BWT_CANON targets the main worktree, not a feature worktree."
         echo ""
-        echo "If this is a planned guard-canary.sh probe, this denial is expected."
-        echo "Record denied, complete all remaining planned probes, then run guard-canary.sh check."
-        echo "Proceed only on CANARY_STATUS=active."
-        echo "Never retry, relocate or bypass a planned probe, or manufacture a success."
-        echo ""
-        echo "Otherwise, for an accidental main-worktree write:"
         echo "redirect to an absolute path rooted at the feature"
         echo "worktree — under .worktrees/<id>-<desc>/ — or to a \${TMPDIR:-/tmp} path."
         echo "If you don't know the worktree path, run 'git worktree list' and use the"

@@ -114,6 +114,19 @@ the marker table is empty, so every host Codex hook pane stays unproven and
 `cenci bind` is the only way to attach it. Sandboxed sessions (no tmux socket)
 and Claude sessions are not affected.
 
+On Linux, `codex --no-daemon` starts the interactive client in the pane even
+when a shared Codex server is running. To use that mode when typing bare
+`codex` in tmux, you can add this function to your interactive zsh or bash config.
+
+```sh
+codex() {
+    if [ "$#" -eq 0 ] && [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+        set -- --no-daemon
+    fi
+    command codex "$@"
+}
+```
+
 A session in that state is shown by `cenci status` with a hint line:
 
 ```text

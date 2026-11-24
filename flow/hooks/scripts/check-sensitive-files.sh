@@ -273,10 +273,8 @@ canonicalize_path() {
 
 # Guard canary receipt (#1411): evidence for flow/codex/guard-canary.sh check
 # that THIS guard denied one of the canary's probes. Called only at the .env
-# deny below, always as `( canary_receipt <path> ) </dev/null >/dev/null 2>&1`:
-# a subshell with every stream detached, so it can never change this hook's
-# exit code, stderr, stdout or decision, and every failure is swallowed. It
-# writes only when <path> is <run-dir>/<slug>-<n>.env, the run dir's basename
+# deny below. Success selects the planned probe diagnostic. It writes only
+# when <path> is <run-dir>/<slug>-<n>.env, the run dir's basename
 # is cenci-guard-canary-<16 lowercase hex>, the run dir is a real directory
 # (not a symlink) owned by the current user and not group/world-writable, and
 # its probes.tsv (a regular file, not a symlink, at most 16 KiB and read
@@ -292,29 +290,29 @@ canary_receipt() {
   _cr_target="$1"
   case "$_cr_target" in
     /*/*.env) ;;
-    *) return 0 ;;
+    *) return 1 ;;
   esac
   _cr_run="${_cr_target%/*}"
   _cr_base="${_cr_run##*/}"
   case "$_cr_base" in
     cenci-guard-canary-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-    *) return 0 ;;
+    *) return 1 ;;
   esac
   _cr_hex="${_cr_base#cenci-guard-canary-}"
   _cr_stem="${_cr_target##*/}"
   _cr_stem="${_cr_stem%.env}"
   _cr_n="${_cr_stem##*-}"
-  [ "$_cr_n" != "$_cr_stem" ] || return 0
+  [ "$_cr_n" != "$_cr_stem" ] || return 1
   case "$_cr_n" in
-    "" | *[!0-9]*) return 0 ;;
+    "" | *[!0-9]*) return 1 ;;
   esac
-  { [ -d "$_cr_run" ] && [ ! -L "$_cr_run" ] && [ -O "$_cr_run" ]; } || return 0
-  _cr_mode=$(ls -ld "$_cr_run") || return 0
+  { [ -d "$_cr_run" ] && [ ! -L "$_cr_run" ] && [ -O "$_cr_run" ]; } || return 1
+  _cr_mode=$(ls -ld "$_cr_run") || return 1
   case "$_cr_mode" in
-    ?????w* | ????????w*) return 0 ;;
+    ?????w* | ????????w*) return 1 ;;
   esac
   _cr_pf="$_cr_run/probes.tsv"
-  { [ -f "$_cr_pf" ] && [ ! -L "$_cr_pf" ]; } || return 0
+  { [ -f "$_cr_pf" ] && [ ! -L "$_cr_pf" ]; } || return 1
   # Bounded read: this runs before the deny's exit 2, and a same-user session
   # can plant its own run dir (it passes every check above) with a huge or
   # sparse probes.tsv. An unbounded read loop would stall the hook until it
@@ -325,14 +323,14 @@ canary_receipt() {
   # in after the -f test blocks the open itself; that needs the same user and
   # only hangs this hook, which is no worse than that user killing it.
   _cr_cap=16384
-  _cr_size=$(wc -c < "$_cr_pf") || return 0
+  _cr_size=$(wc -c < "$_cr_pf") || return 1
   _cr_size="${_cr_size#"${_cr_size%%[0-9]*}"}"
   _cr_size="${_cr_size%"${_cr_size##*[0-9]}"}"
   case "$_cr_size" in
-    "" | *[!0-9]* | ??????*) return 0 ;;
+    "" | *[!0-9]* | ??????*) return 1 ;;
   esac
-  [ "$_cr_size" -le "$_cr_cap" ] || return 0
-  _cr_data=$(head -c "$_cr_cap" "$_cr_pf") || return 0
+  [ "$_cr_size" -le "$_cr_cap" ] || return 1
+  _cr_data=$(head -c "$_cr_cap" "$_cr_pf") || return 1
   _cr_tab=$(printf '\t')
   _cr_hex_ok=0
   _cr_listed=0
@@ -350,14 +348,13 @@ canary_receipt() {
   done <<CR_PROBES_EOF
 $_cr_data
 CR_PROBES_EOF
-  [ "$_cr_hex_ok" = 1 ] && [ "$_cr_listed" = 1 ] || return 0
-  _cr_tool=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""') || return 0
+  [ "$_cr_hex_ok" = 1 ] && [ "$_cr_listed" = 1 ] || return 1
+  _cr_tool=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""') || return 1
   case "$_cr_tool" in
-    "" | *[!A-Za-z0-9_]*) return 0 ;;
+    "" | *[!A-Za-z0-9_]*) return 1 ;;
   esac
-  _cr_file=$(mktemp "$_cr_run/receipt-check-sensitive-files-$_cr_n.XXXXXX") || return 0
+  _cr_file=$(mktemp "$_cr_run/receipt-check-sensitive-files-$_cr_n.XXXXXX") || return 1
   printf 'V1\tcheck-sensitive-files\t%s\t%s\t%s\n' "$_cr_hex" "$_cr_n" "$_cr_tool" > "$_cr_file"
-  return 0
 }
 
 # Check against sensitive file patterns. Run against BOTH the raw path and
@@ -366,7 +363,10 @@ CR_PROBES_EOF
 check_sensitive() {
   case "$1" in
     *.env|*.env.*|*/.env|*/.env.*)
-      ( canary_receipt "$1" ) </dev/null >/dev/null 2>&1
+      if ( canary_receipt "$1" ) </dev/null >/dev/null 2>&1; then
+        echo "Expected guard check — Refusing to write to the test environment file." >&2
+        exit 2
+      fi
       echo "BLOCKED: Refusing to write to environment file: $1" >&2
       echo "Environment files may contain secrets. Edit manually if needed." >&2
       exit 2
