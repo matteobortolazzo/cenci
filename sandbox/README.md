@@ -437,6 +437,28 @@ instructions keep their usual scope. If a sandbox-local personal skill or
 instruction already occupies a selected name, choose a different skill name or
 move the conflicting file in the sandbox home before opening the agent.
 
+The launcher refuses a source in a sensitive host location and exits 1 before
+any runtime call. The error names the fleet config file, the key
+(`sandboxHostProfiles.<agent>.content.skillDirectories[<index>]` or
+`sandboxHostProfiles.<agent>.content.instructionFile`), the entry and the
+reason. A source cannot be `$HOME`, `~/.claude`, `~/.codex`, the host
+`$CODEX_HOME` or a parent of any of them, and cannot overlap
+`~/.claude/.credentials.json` or the `auth.json` in `~/.codex` or `$CODEX_HOME`.
+It also cannot overlap the other locations `--add-dir` refuses: SSH and GnuPG
+keys, cenci's fleet config and state, runtime and session sockets, the
+directories on your `$PATH` and the tool homes the host runs programs from.
+A skill below one of those homes, such as `~/.claude/skills/review` or a skill
+inside `$CODEX_HOME/skills`, is still accepted. The source must also stay under
+your home, so a `$CODEX_HOME` outside it cannot supply content.
+
+A host profile supports `repositories`, `content`, `preferences` and `version`
+only. `sandboxHostProfiles.<agent>.plugins` is rejected as not yet supported,
+and so is any `sandboxHostProfiles` key other than `claude` and `codex`, such as
+`opencode`. Both refusals name the key. An unsupported agent key is refused on
+every Claude Code and Codex launch, while `plugins` under an agent's profile is
+refused on that agent's launches, so a config that holds one must remove it
+first.
+
 Edit a skill on the host and open another agent session to use the change.
 Adding or removing selected sources, replacing an entire skill directory, or
 atomically replacing the selected instruction file can require recreating the
