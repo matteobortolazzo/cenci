@@ -192,7 +192,9 @@ cnh_classify_verdict() {
 # -- recover a Codex 0.166.0 router denial omitted from --json tool items.
 # Only the runner's own prompt templates have an expected command. Require
 # that exact command (including every patch line), a matching tool tap, and
-# exactly one anchored router diagnostic. Return command and error separately:
+# exactly one anchored router diagnostic whose error is a guard denial: an
+# ordinary "BLOCKED: " refusal or a registered canary probe's one-line
+# "Expected guard check — " diagnostic. Return command and error separately:
 # MOVE can be denied on its source while the effect probe names its destination,
 # but a guard phrase in the command must never count as the guard's own message.
 # Unknown prompts, changed log formats and ambiguous records fail closed.
@@ -229,7 +231,7 @@ cnh_router_block() {
         | ($lines[$starts[0]:] | join("\n") | sub($header; "") | rtrimstr("\n")) as $record
         | ($record | split(". Command: ")) as $parts
         | select(($parts | length) == 2 and $parts[1] == $command)
-        | select($parts[0] | startswith("BLOCKED: "))
+        | select($parts[0] | startswith("BLOCKED: ") or startswith("Expected guard check \u2014 "))
         | {command: $command, error: $parts[0]}
     ' 2>/dev/null
 }
