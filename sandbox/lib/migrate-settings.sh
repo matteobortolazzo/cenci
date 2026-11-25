@@ -11,8 +11,9 @@
 # What the migration does, in one idempotent pass:
 #   * seeds the container-only bypass-mode keys (see entrypoint.sh for why
 #     these are safe only inside the container),
-#   * enables the current cenci-watch/cenci plugins from the cenci
-#     marketplace so coding-agent sessions are visible on the host status bar,
+#   * enables the cenci-watch/cenci plugins named by CENCI_SANDBOX_PLUGINS
+#     (default both) from the cenci marketplace so coding-agent sessions are
+#     visible on the host status bar, and disables the ones it excludes,
 #   * removes the stale pre-rename muxwatch/ccflow plugins and the old
 #     claude-tools marketplace, which would otherwise 404 on bootstrap and
 #     shadow the renamed plugins,
@@ -23,9 +24,10 @@
 # mode safe — these must never reach the host ~/.claude/settings.json.
 BYPASS_SETTINGS='{"skipDangerousModePermissionPrompt":true,"permissions":{"defaultMode":"bypassPermissions"}}'
 
-# Current marketplace + plugins that make sandbox sessions visible to the host
-# cenci daemon.
-PLUGIN_SETTINGS='{"extraKnownMarketplaces":{"cenci":{"source":{"source":"github","repo":"matteobortolazzo/cenci"}}},"enabledPlugins":{"cenci-watch@cenci":true,"cenci@cenci":true}}'
+# The cenci marketplace the sandbox plugins come from. Seeded by migrate_settings
+# only when CENCI_SANDBOX_PLUGINS names at least one plugin. Which plugins are
+# enabled is decided from that list, not from this constant.
+MARKETPLACE_SETTINGS='{"extraKnownMarketplaces":{"cenci":{"source":{"source":"github","repo":"matteobortolazzo/cenci"}}}}'
 
 # Status line rendered by the CCometixLine binary baked into the base image
 # (Dockerfile.base). Seeded only when the volume has no statusLine of its own:
@@ -43,11 +45,39 @@ UI_PREFERENCE_SETTINGS='{"tui":"fullscreen","showClearContextOnPlanAccept":true}
 # migrated object to stdout. Reads `{}` when given an empty/whitespace input so
 # fresh and invalid volumes get seeded too. Idempotent: running it on its own
 # output is a no-op.
+#
+# Which cenci plugins are enabled comes from the environment:
+# ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch} — unset (a container created before
+# the launcher set it) keeps today's pair, a set list names exactly the plugins
+# to enable, and an explicitly empty list enables none. Within the closed set
+# {cenci, cenci-watch} a listed plugin is force-enabled and an excluded one has
+# its enabledPlugins entry deleted, because this runs on every boot against a
+# persistent home volume: a narrowed list must disable what an earlier boot
+# enabled. Every other enabledPlugins key is left alone. The deletions (these
+# and the stale claude-tools ones) apply only to an object-typed
+# enabledPlugins/extraKnownMarketplaces; a non-object value (string, array) has
+# nothing to delete, so it is left as it is and the migration still succeeds —
+# a failed jq would leave settings.json untouched and skip the bypass seed. A
+# list that merges into a key (any token for the marketplace, a known plugin
+# for enabledPlugins) still replaces such a value with an object, as the old
+# unconditional merge did; an empty or whitespace-only list merges nothing. The
+# cenci marketplace is seeded only for a non-empty list; an already-registered
+# one is never removed. Installed plugin files are never touched here. The merge order
+# (marketplace before enabledPlugins, cenci-watch before cenci) is the
+# pre-list order on purpose: an unset variable must reproduce the old output
+# byte for byte, so an unchanged sandbox rewrites no settings.json bytes.
 migrate_settings() {
-    jq --argjson bypass "${BYPASS_SETTINGS}" --argjson plugins "${PLUGIN_SETTINGS}" --argjson statusline "${STATUSLINE_SETTINGS}" --argjson uiprefs "${UI_PREFERENCE_SETTINGS}" '
-        (. * $bypass * $plugins)
-        | del(.enabledPlugins["muxwatch@claude-tools"], .enabledPlugins["ccflow@claude-tools"])
-        | del(.extraKnownMarketplaces["claude-tools"])
+    jq --argjson bypass "${BYPASS_SETTINGS}" --argjson marketplace "${MARKETPLACE_SETTINGS}" --arg list "${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}" --argjson statusline "${STATUSLINE_SETTINGS}" --argjson uiprefs "${UI_PREFERENCE_SETTINGS}" '
+        def drop($key; $names): if (.[$key] | type) == "object" then del(.[$key][$names[]]) else . end;
+        ([$list | splits("\\s+") | select(length > 0)]) as $wanted
+        | (["cenci-watch", "cenci"] | map(select(. as $p | $wanted | index($p) != null))) as $enable
+        | (. * $bypass
+            * (if ($wanted | length) > 0 then $marketplace else {} end)
+            * (if ($enable | length) > 0 then {enabledPlugins: ($enable | map({(. + "@cenci"): true}) | add)} else {} end))
+        | reduce ("cenci-watch", "cenci") as $p (.;
+            if ($enable | index($p)) == null then drop("enabledPlugins"; [$p + "@cenci"]) else . end)
+        | drop("enabledPlugins"; ["muxwatch@claude-tools", "ccflow@claude-tools"])
+        | drop("extraKnownMarketplaces"; ["claude-tools"])
         | if has("statusLine") then . else . + $statusline end
         | reduce ($uiprefs | to_entries[]) as $pref (.; if has($pref.key) then . else . + {($pref.key): $pref.value} end)
     '
@@ -131,6 +161,10 @@ provision_plugins() {
     local agent_cli="${CENCI_AGENT_CLI:-claude}"
     shift 3
 
+    # No plugins requested (an explicitly empty CENCI_SANDBOX_PLUGINS): do
+    # nothing at all — not even register the marketplace.
+    [[ $# -gt 0 ]] || return 0
+
     if ! command -v "${agent_cli}" >/dev/null 2>&1; then
         echo "warning: agent CLI '${agent_cli}' not found; skipping plugin provisioning this session" >&2
         return 0
@@ -176,6 +210,9 @@ update_plugins() {
     local plugins_dir="$1" marketplace_name="$2" ttl_minutes="$3"
     local agent_cli="${CENCI_AGENT_CLI:-claude}"
     shift 3
+
+    # No plugins requested: skip the marketplace refresh and the stamp too.
+    [[ $# -gt 0 ]] || return 0
 
     if ! command -v "${agent_cli}" >/dev/null 2>&1; then
         echo "warning: agent CLI '${agent_cli}' not found; skipping plugin update this session" >&2
@@ -228,6 +265,9 @@ provision_codex_plugins() {
     local codex_dir="$1" marketplace_name="$2" marketplace_repo="$3"
     local agent_cli="${CENCI_AGENT_CLI:-codex}"
     shift 3
+
+    # No plugins requested: do nothing at all, including marketplace registration.
+    [[ $# -gt 0 ]] || return 0
 
     if ! command -v "${agent_cli}" >/dev/null 2>&1; then
         echo "warning: agent CLI '${agent_cli}' not found; skipping Codex plugin provisioning this session" >&2
@@ -285,6 +325,9 @@ update_codex_plugins() {
     local codex_dir="$1" marketplace_name="$2" ttl_minutes="$3"
     local agent_cli="${CENCI_AGENT_CLI:-codex}"
     shift 3
+
+    # No plugins requested: skip the marketplace refresh and the stamp too.
+    [[ $# -gt 0 ]] || return 0
 
     if ! command -v "${agent_cli}" >/dev/null 2>&1; then
         echo "warning: agent CLI '${agent_cli}' not found; skipping Codex plugin update this session" >&2
