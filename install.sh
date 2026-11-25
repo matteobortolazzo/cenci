@@ -48,6 +48,11 @@
 #                                          itself, all come from this ref instead of the
 #                                          resolved latest release tag (e.g. --ref main);
 #                                          same as CENCI_REF=<ref>
+#   --only <list> / --only=<list>         comma-separated subset of cenci, cenci-watch,
+#                                          cenci-sandbox; cenci-watch is mandatory (the cenci
+#                                          binary ships in it). Update mode reconciles exactly
+#                                          the listed plugins, leaving the rest untouched.
+#                                          Install/update only (usage error in doctor/uninstall)
 #   --help                                this text
 
 set -u
@@ -83,6 +88,10 @@ warn() { printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$*"; }
 fail() { printf '  %s✗%s %s\n' "$RED" "$RESET" "$*"; }
 step() { printf '\n%s==>%s %s%s%s\n' "$BLUE" "$RESET" "$BOLD" "$*" "$RESET"; }
 die()  { printf '%sError:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+# usage_die — bad invocation (unknown/missing/conflicting arguments): same
+# format as die, exit 2 per docs/cli-conventions.md. Never call it inside
+# $(...): that would exit only the subshell and swallow the error.
+usage_die() { printf '%sError:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 2; }
 
 # ---------------------------------------------------------- interactivity ----
 
@@ -1460,6 +1469,36 @@ run_doctor() {
 SELECTED="$ALL_PLUGINS"
 
 selected() { case " $SELECTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# apply_only_selection <list> — set SELECTED from a --only value: a
+# comma-separated subset of ALL_PLUGINS that must include cenci-watch (the
+# cenci binary ships there). SELECTED is rebuilt in ALL_PLUGINS order, which
+# also drops duplicates. Mutates the global directly and calls usage_die, so
+# it must never run inside $(...).
+apply_only_selection() {
+	local valid_names="cenci, cenci-watch, cenci-sandbox"
+	local rest="$1," name p chosen=" " new=""
+	while [ -n "$rest" ]; do
+		name="${rest%%,*}"
+		rest="${rest#*,}"
+		case "$name" in
+		cenci | cenci-watch | cenci-sandbox) ;;
+		"") usage_die "--only: empty plugin name — expected a comma-separated list of: $valid_names (see --help)" ;;
+		*) usage_die "--only: unknown plugin '$name' — expected a comma-separated list of: $valid_names (see --help)" ;;
+		esac
+		chosen="$chosen$name "
+	done
+	for p in $ALL_PLUGINS; do
+		case "$chosen" in
+		*" $p "*) new="${new:+$new }$p" ;;
+		esac
+	done
+	case " $new " in
+	*" cenci-watch "*) ;;
+	*) usage_die "--only must include cenci-watch: the cenci binary that flow and the sandbox launcher run ships in cenci-watch (see --help)" ;;
+	esac
+	SELECTED="$new"
+}
 
 # ------------------------------------------------------------ install steps ----
 
@@ -3789,6 +3828,8 @@ LOGIN_SERVICE=ask
 HOST_CCLINE=ask
 HOST_PERMISSIONS=ask
 INSTALL_FAILED=0
+ONLY_GIVEN=0
+ONLY_LIST=""
 CENCI_REF="${CENCI_REF:-}"
 # Captured before the arg-parse loop below consumes "$@" via shift, so the
 # piped-release-pin re-exec can forward the caller's original arguments
@@ -3848,7 +3889,17 @@ Flags:
                                          resolved latest release tag (e.g. --ref main,
                                          unverified — see above);
                                          same as CENCI_REF=<ref>
+  --only <list> / --only=<list>         comma-separated subset of cenci, cenci-watch,
+                                         cenci-sandbox. cenci-watch is mandatory: the cenci
+                                         binary that flow and the sandbox launcher run ships
+                                         in it. Update mode reconciles exactly the listed
+                                         plugins (installs missing ones, updates installed
+                                         ones) and leaves unlisted plugins untouched.
+                                         Install and update only; doctor and uninstall
+                                         always cover the whole stack
   --help                                this text
+
+Usage errors (unknown option, missing value, conflicting flags) exit 2.
 EOF
 }
 
@@ -3865,24 +3916,46 @@ while [ $# -gt 0 ]; do
 	--tmux-defaults) TMUX_DEFAULTS=yes ;;
 	--no-tmux-defaults) TMUX_DEFAULTS=no ;;
 	--no-login-service) LOGIN_SERVICE=no ;;
-	--host-ccline) [ "$HOST_CCLINE" != no ] || die "conflicting host ccline flags"; HOST_CCLINE=yes ;;
-	--no-host-ccline) [ "$HOST_CCLINE" != yes ] || die "conflicting host ccline flags"; HOST_CCLINE=no ;;
-	--host-permissions) [ "$HOST_PERMISSIONS" != no ] || die "conflicting host permissions flags"; HOST_PERMISSIONS=yes ;;
-	--no-host-permissions) [ "$HOST_PERMISSIONS" != yes ] || die "conflicting host permissions flags"; HOST_PERMISSIONS=no ;;
+	--host-ccline) [ "$HOST_CCLINE" != no ] || usage_die "conflicting host ccline flags"; HOST_CCLINE=yes ;;
+	--no-host-ccline) [ "$HOST_CCLINE" != yes ] || usage_die "conflicting host ccline flags"; HOST_CCLINE=no ;;
+	--host-permissions) [ "$HOST_PERMISSIONS" != no ] || usage_die "conflicting host permissions flags"; HOST_PERMISSIONS=yes ;;
+	--no-host-permissions) [ "$HOST_PERMISSIONS" != yes ] || usage_die "conflicting host permissions flags"; HOST_PERMISSIONS=no ;;
 	--ref)
-		[ $# -ge 2 ] || die "--ref requires a value (see --help)"
+		[ $# -ge 2 ] || usage_die "--ref requires a value (see --help)"
 		CENCI_REF="$2"
 		shift
 		;;
 	--ref=*) CENCI_REF="${1#--ref=}" ;;
+	--only)
+		[ $# -ge 2 ] || usage_die "--only requires a value — a comma-separated list of: cenci, cenci-watch, cenci-sandbox (see --help)"
+		[ "$ONLY_GIVEN" -eq 0 ] || usage_die "--only given more than once — pass one comma-separated list (see --help)"
+		ONLY_GIVEN=1
+		ONLY_LIST="$2"
+		shift
+		;;
+	--only=*)
+		[ "$ONLY_GIVEN" -eq 0 ] || usage_die "--only given more than once — pass one comma-separated list (see --help)"
+		ONLY_GIVEN=1
+		ONLY_LIST="${1#--only=}"
+		;;
 	--help | -h)
 		usage
 		exit 0
 		;;
-	*) die "unknown option '$1' (see --help)" ;;
+	*) usage_die "unknown option '$1' (see --help)" ;;
 	esac
 	shift
 done
+
+# --only is validated once, after the loop: a mode word may follow the flag
+# (`--only cenci-watch doctor`), and a usage error must never pay for the
+# release-pin network lookup below.
+if [ "$ONLY_GIVEN" -eq 1 ]; then
+	case "$MODE" in
+	doctor | uninstall) usage_die "--only is not supported in $MODE mode — doctor and uninstall always cover the whole stack (see --help)" ;;
+	esac
+	apply_only_selection "$ONLY_LIST"
+fi
 
 # ------------------------------------------------ immutable release pin ----
 

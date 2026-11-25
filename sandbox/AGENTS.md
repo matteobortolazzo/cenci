@@ -27,6 +27,7 @@ Host-runnable installer suites (mock PATH + fake HOME, no container needed):
 ```bash
 bash sandbox/tests/install-update.test.sh        # daemon restart on update
 bash sandbox/tests/installer-clients.test.sh     # client detection + launchers
+bash sandbox/tests/installer-selection.test.sh   # install.sh --only <list> parsing/validation, exit-2 usage-error contract, piped re-exec forwarding
 bash sandbox/tests/cenci-widgets.test.sh         # GUI bar-widget detect/install/reload
 bash sandbox/tests/settings-merge.test.sh        # lib/migrate-settings.sh deep-merge behavior
 bash sandbox/tests/seed-auth.test.sh             # lib/seed-auth.sh credential seeding
