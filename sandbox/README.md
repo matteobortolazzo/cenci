@@ -271,6 +271,11 @@ OpenCode's `auth.json` (when present) goes
 through the same seed-once staging path — see
 [OpenCode auth](#opencode-auth) below.
 
+The "independent login" and "stays logged in indefinitely" statements above describe the
+intended design, not verified provider behavior: whether either provider rotates refresh
+tokens, detects their reuse or tolerates several holders of one login is listed under
+[Unresolved](./docs/host-auth-lifecycle.md#unresolved) in the login lifecycle report.
+
 If an instance's login does die (e.g. you revoked all sessions on claude.ai),
 force a one-time re-copy from the host:
 
@@ -279,6 +284,28 @@ cenci open --reseed-creds
 # or the maintenance-verb alias:
 cenci sandbox reseed-creds
 ```
+
+### Login lifecycle and limits
+
+Claude and Codex credentials are copied from the host into a sandbox's home volume once,
+when the volume has none, and are not overwritten on later starts. Two consequences follow:
+
+- **A volume copy can go stale.** If the host refreshes or replaces its login after the
+  volume was seeded, the volume keeps its older copy. With rotating refresh tokens that copy
+  may no longer work. `cenci open --reseed-creds` (or `cenci sandbox reseed-creds`) re-copies
+  the host's current login over the volume's, and is the recovery path. The re-copy only
+  helps if the host login itself is still valid.
+- **Several sandboxes and the host holding one login is unverified.** Whether the host and
+  more than one sandbox can safely keep the same account's login at once, who wins a
+  simultaneous refresh, and what a refresh interrupted by a crash leaves behind have not been
+  established for either provider. Nothing here claims they are safe.
+
+Any credential the agent CLI reads inside the container is readable by any process running
+as the same user there, repository code included. Seamless shared login across the host and
+sandboxes is currently unsupported; the investigation, its evidence tiers, the modeled
+failure cases and the manual verification matrix are in
+[`docs/host-auth-lifecycle.md`](./docs/host-auth-lifecycle.md). The matching failure cases
+run credential-free in `sandbox/tests/auth-lifecycle.test.sh`.
 
 ### GitHub CLI auth
 

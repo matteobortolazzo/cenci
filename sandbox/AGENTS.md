@@ -30,6 +30,7 @@ bash sandbox/tests/installer-clients.test.sh     # client detection + launchers
 bash sandbox/tests/cenci-widgets.test.sh         # GUI bar-widget detect/install/reload
 bash sandbox/tests/settings-merge.test.sh        # lib/migrate-settings.sh deep-merge behavior
 bash sandbox/tests/seed-auth.test.sh             # lib/seed-auth.sh credential seeding
+bash sandbox/tests/auth-lifecycle.test.sh        # modeled login-lifecycle failure cases + real seed_credential reseed recovery
 bash sandbox/tests/codex-config.test.sh          # lib/codex-config.sh config generation
 bash sandbox/tests/agent-cli.test.sh             # shared, verified, atomic agent update lifecycle
 bash sandbox/tests/fragments-drift.test.sh       # Dockerfile vs fragments/*.dockerfile byte-parity
@@ -220,3 +221,4 @@ Repo-level conventions live at `<repo-root>/docs/` (read on demand); CLI grammar
 On-demand topic docs live at `docs/`:
 - `docs/entrypoint.md` — `entrypoint.sh` + its sourced `lib/` helpers, their root phase, and every `docker exec` call site the launcher assembles
 - `docs/test-harness.md` — host-runnable `sandbox/tests/*.test.sh` suites
+- `docs/host-auth-lifecycle.md` — the dated, evidence-tiered report on Claude Code and Codex login lifecycle in the sandbox (seed-once limits, modeled failure cases, comparison, manual matrix, verdict that seamless shared login is unsupported); read before changing credential seeding or the README/SECURITY login claims
