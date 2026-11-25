@@ -80,6 +80,92 @@ func TestDryRunPersonalSkillPreviewAndReuse(t *testing.T) {
 	}
 }
 
+// A refused host-profile source or key fails the preview before the launcher
+// makes any runtime call. The fake docker logs every invocation, and a control
+// with a valid source proves the same preview does reach it, so an empty log
+// means the refusal came first.
+func TestDryRunHostProfileRefusalMakesNoRuntimeCall(t *testing.T) {
+	setup := func(t *testing.T) (env hostProfileEnv, callLog string) {
+		t.Helper()
+		env = newHostProfileEnv(t)
+		t.Chdir(env.repo)
+		return env, dryRunWithCallLog(t)
+	}
+
+	t.Run("control: a valid source reaches the runtime", func(t *testing.T) {
+		env, callLog := setup(t)
+		skill := writeSkill(t, filepath.Join(env.home, ".claude", "skills", "ok"))
+		env.writeProfile(t, "claude", map[string]any{"skillDirectories": []string{skill}})
+		if _, err := dryRunEngine().DryRun(Options{Agent: "claude"}); err != nil {
+			t.Fatal(err)
+		}
+		if len(readCallLog(t, callLog)) == 0 {
+			t.Fatal("the fake runtime recorded nothing for a valid preview, so the no-call assertions below would be vacuous")
+		}
+	})
+
+	// configure writes the refused policy and returns the offending entry, if any.
+	cases := []struct {
+		name      string
+		configure func(t *testing.T, env hostProfileEnv) string
+		key       string
+		reason    string
+	}{
+		{
+			name: "guarded skill source",
+			configure: func(t *testing.T, env hostProfileEnv) string {
+				skill := writeSkill(t, filepath.Join(env.home, ".ssh", "skills", "dryrun"))
+				env.writeProfile(t, "claude", map[string]any{"skillDirectories": []string{skill}})
+				return skill
+			},
+			key:    "sandboxHostProfiles.claude.content.skillDirectories[0]",
+			reason: "SSH keys",
+		},
+		{
+			name: "opencode key",
+			configure: func(t *testing.T, env hostProfileEnv) string {
+				env.writeProfile(t, "opencode", nil)
+				return ""
+			},
+			key: `sandboxHostProfiles["opencode"]`,
+		},
+		{
+			name: "plugins",
+			configure: func(t *testing.T, env hostProfileEnv) string {
+				env.writeConfig(t, map[string]any{"sandboxHostProfiles": map[string]any{"claude": map[string]any{
+					"repositories": []string{env.repo},
+					"plugins":      map[string]any{"example": map[string]any{"enabled": true}},
+				}}})
+				return ""
+			},
+			key:    "sandboxHostProfiles.claude.plugins",
+			reason: "not yet supported",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, callLog := setup(t)
+			want := []string{env.config, tc.key, tc.reason}
+			if entry := tc.configure(t, env); entry != "" {
+				want = append(want, entry)
+			}
+
+			_, err := dryRunEngine().DryRun(Options{Agent: "claude"})
+			if err == nil {
+				t.Fatalf("preview accepted a refused host profile (%s)", tc.name)
+			}
+			for _, w := range want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("refusal does not contain %q: %v", w, err)
+				}
+			}
+			if calls := readCallLog(t, callLog); len(calls) != 0 {
+				t.Fatalf("the refusal came after runtime calls: %q", calls)
+			}
+		})
+	}
+}
+
 func TestHostProfileAttachRequiresAuthorizedWorkspace(t *testing.T) {
 	repo, home := newAuditTestRepo(t), t.TempDir()
 	other := filepath.Join(t.TempDir(), filepath.Base(repo))

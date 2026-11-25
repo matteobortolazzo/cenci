@@ -106,6 +106,19 @@ func readHostProfile(agent string, scope Scope, home, path string) (hostProfile,
 	if err := json.Unmarshal(data, &config); err != nil {
 		return profile, fmt.Errorf("%s: %w", path, err)
 	}
+	// Only Claude Code and Codex have a host profile. Refusing the other keys on
+	// every resolution keeps a profile for a paused agent from sitting unread.
+	var unsupported []string
+	for key := range config.Profiles {
+		if key != "claude" && key != "codex" {
+			unsupported = append(unsupported, key)
+		}
+	}
+	if len(unsupported) > 0 {
+		sort.Strings(unsupported)
+		// %q keeps a control character in a JSON key from reaching the terminal.
+		return profile, fmt.Errorf("%s: sandboxHostProfiles[%q] is not supported; only sandboxHostProfiles.claude and sandboxHostProfiles.codex exist", path, unsupported[0])
+	}
 	raw, ok := config.Profiles[agent]
 	if !ok {
 		return profile, nil
@@ -123,6 +136,9 @@ func readHostProfile(agent string, scope Scope, home, path string) (hostProfile,
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&profile); err != nil {
 		return hostProfile{}, fmt.Errorf("%s: sandboxHostProfiles.%s: %w", path, agent, err)
+	}
+	if len(profile.Plugins) > 0 && string(profile.Plugins) != "null" {
+		return hostProfile{}, fmt.Errorf("%s: sandboxHostProfiles.%s.plugins is not yet supported; remove it", path, agent)
 	}
 	profile.configPath = path
 	for _, repo := range profile.Repositories {
@@ -156,6 +172,13 @@ func readHostProfile(agent string, scope Scope, home, path string) (hostProfile,
 	return profile, err
 }
 
+// hostContentOwnerTrusted reports whether an entry owned by uid may supply host
+// content: the invoking user or root. It is a variable only so a test can mark
+// one path as foreign-owned without being root; production never reassigns it.
+var hostContentOwnerTrusted = func(_ string, uid uint32) bool {
+	return int(uid) == os.Getuid() || uid == 0
+}
+
 // Only canonical paths under the host home may authorize or supply content.
 // Refuse checkout-resident or group/other-writable paths, including their
 // ancestors: a repository-selected XDG path must never become a trust root.
@@ -187,7 +210,7 @@ func checkHostProfilePath(path, home string, scope Scope) error {
 		// System temp directories may contain a private home in tests or
 		// ephemeral environments. Sticky ownership protects its child name.
 		stickyAncestor := !pathContains(realHome, p) && info.Mode()&os.ModeSticky != 0
-		if int(st.Uid) != os.Getuid() && st.Uid != 0 || info.Mode().Perm()&0022 != 0 && !stickyAncestor {
+		if !hostContentOwnerTrusted(p, st.Uid) || info.Mode().Perm()&0022 != 0 && !stickyAncestor {
 			return fmt.Errorf("host profile %q must be owned by the current user or root and writable only by its owner", p)
 		}
 		if info.IsDir() {
@@ -206,47 +229,151 @@ func checkHostProfilePath(path, home string, scope Scope) error {
 	return nil
 }
 
+// hostProfileGuards is the sensitive-location denylist for host-profile sources:
+// addDirSensitiveGuards with one change. Personal skills and instructions live
+// under ~/.claude and ~/.codex, so each agent home is refused whole (a source
+// equal to it or to a parent of it) instead of with everything inside, and only
+// its credential file is refused by overlap. $CODEX_HOME gets the same treatment
+// as ~/.codex, a relative value resolved against the working directory as
+// --add-dir does.
+func hostProfileGuards(home string) ([]addDirGuard, error) {
+	guards, err := addDirSensitiveGuards(home)
+	if err != nil {
+		return nil, hostProfileRuntimeError(err)
+	}
+	type agentHome struct{ dir, credentials string }
+	var homes []agentHome
+	// superseded are the credential guards addDirHomeGuards builds for the Claude
+	// and Codex homes. Only those are replaced by the whole-home guard: another
+	// guard that merely has the same path ($PATH, the fleet config, a socket
+	// directory) keeps its own reason, so it is matched by reason as well.
+	var superseded []addDirGuard
+	// addDirSensitiveGuards builds the per-home guards for /root as well only
+	// when $HOME is strictly inside it.
+	userHomes := []string{home}
+	if filepath.Clean(home) != addDirRootHome && pathContains(addDirRootHome, home) {
+		userHomes = append(userHomes, addDirRootHome)
+	}
+	for _, h := range userHomes {
+		for _, spec := range credentialSourceSpecs {
+			if spec.typ == CredentialTypeClaude || spec.typ == CredentialTypeCodex {
+				credentials := spec.pathFrom(h)
+				dir := filepath.Dir(credentials)
+				homes = append(homes, agentHome{dir: dir, credentials: credentials})
+				superseded = append(superseded, addDirGuard{path: dir, mode: forbidOverlap, why: "it holds " + spec.typ + " credentials"})
+			}
+		}
+	}
+	codexHome, err := addDirEnvPath("CODEX_HOME")
+	if err != nil {
+		return nil, hostProfileRuntimeError(err)
+	}
+	if codexHome != "" {
+		homes = append(homes, agentHome{dir: codexHome, credentials: filepath.Join(codexHome, "auth.json")})
+	}
+	guards = slices.DeleteFunc(guards, func(g addDirGuard) bool {
+		return slices.ContainsFunc(superseded, func(s addDirGuard) bool {
+			return s.path == g.path && s.mode == g.mode && s.why == g.why
+		})
+	})
+	for _, h := range homes {
+		guards = append(guards,
+			addDirGuard{path: h.dir, mode: forbidCovering, why: "the agent home " + h.dir + " holds credentials, so it or a parent of it cannot be a source; select a directory inside it"},
+			addDirGuard{path: h.credentials, mode: forbidOverlap, why: "it holds agent credentials"},
+		)
+	}
+	return guards, nil
+}
+
+// hostProfileRuntimeError rewords a guard-building failure, a UsageError worded
+// for --add-dir, as the runtime failure (exit 1) a host-profile refusal is: a
+// host-profile launch has no --add-dir to blame.
+func hostProfileRuntimeError(err error) error {
+	return errors.New(strings.TrimPrefix(err.Error(), "--add-dir cannot be validated: "))
+}
+
+// refuseSensitiveHostSource checks the as-written and the symlink-resolved form
+// of a source against guards and returns the first reason that matches.
+func refuseSensitiveHostSource(guards []addDirGuard, path string) error {
+	forms := uniqueStrings(path, resolveExistingPrefix(path))
+	for _, g := range guards {
+		if g.refuses(forms) {
+			return fmt.Errorf("it is a sensitive host location (%s); it cannot be mounted into the sandbox", g.why)
+		}
+	}
+	return nil
+}
+
 func (p *hostProfile) resolveContent(agent string, scope Scope, home string) error {
+	content := fmt.Sprintf("%s: sandboxHostProfiles.%s.content", p.configPath, agent)
+	var guards []addDirGuard
+	if len(p.Content.SkillDirectories) > 0 || p.Content.InstructionFile != "" {
+		var err error
+		if guards, err = hostProfileGuards(home); err != nil {
+			return fmt.Errorf("%s: cannot evaluate the sensitive-location guards: %w", content, err)
+		}
+	}
+	// origin names the config key and entry each destination came from, so a
+	// collision or a late failure names the entry that caused it.
+	origin := map[string]string{}
 	var mounts []MountPosture
-	for _, skill := range p.Content.SkillDirectories {
+	for i, skill := range p.Content.SkillDirectories {
+		key := fmt.Sprintf("%s.skillDirectories[%d] %q", content, i, skill)
+		refuse := func(err error) error {
+			return fmt.Errorf("%s: %w", key, err)
+		}
 		if err := checkHostProfilePath(skill, home, scope); err != nil {
-			return err
+			return refuse(err)
+		}
+		if err := refuseSensitiveHostSource(guards, skill); err != nil {
+			return refuse(err)
 		}
 		name := filepath.Base(skill)
 		if filepath.Base(filepath.Dir(skill)) != "skills" || strings.HasPrefix(name, ".") {
-			return fmt.Errorf("host skill %q must name an individual visible directory under skills/", skill)
+			return refuse(errors.New("a host skill must name an individual visible directory under skills/"))
 		}
 		if err := validateSkillDirectory(skill); err != nil {
-			return err
+			return refuse(err)
 		}
-		mounts = append(mounts, MountPosture{Source: skill, Destination: hostContentRoot + "/skills/" + name, ReadOnly: true, Kind: MountKindHostContent})
+		mount := MountPosture{Source: skill, Destination: hostContentRoot + "/skills/" + name, ReadOnly: true, Kind: MountKindHostContent}
+		if prev, taken := origin[mount.Destination]; taken {
+			return refuse(fmt.Errorf("host content collision at %s with %s; select only one source with that name", mount.Destination, prev))
+		}
+		origin[mount.Destination] = key
+		mounts = append(mounts, mount)
 	}
 	if src := p.Content.InstructionFile; src != "" {
+		key := fmt.Sprintf("%s.instructionFile %q", content, src)
+		refuse := func(err error) error {
+			return fmt.Errorf("%s: %w", key, err)
+		}
 		if err := checkHostProfilePath(src, home, scope); err != nil {
-			return err
+			return refuse(err)
+		}
+		if err := refuseSensitiveHostSource(guards, src); err != nil {
+			return refuse(err)
 		}
 		name := filepath.Base(src)
 		if agent == "claude" && name != "CLAUDE.md" || agent == "codex" && name != "AGENTS.md" && name != "AGENTS.override.md" {
-			return fmt.Errorf("unsupported %s host instruction filename %q", agent, name)
+			return refuse(fmt.Errorf("unsupported %s host instruction filename %q", agent, name))
 		}
 		info, err := os.Stat(src)
 		if err != nil {
-			return err
+			return refuse(err)
 		}
 		if err := validatePersonalFile(src, info); err != nil {
-			return err
+			return refuse(err)
 		}
-		mounts = append(mounts, MountPosture{Source: src, Destination: hostContentRoot + "/instructions/" + name, ReadOnly: true, Kind: MountKindHostContent})
+		mount := MountPosture{Source: src, Destination: hostContentRoot + "/instructions/" + name, ReadOnly: true, Kind: MountKindHostContent}
+		origin[mount.Destination] = key
+		mounts = append(mounts, mount)
 	}
 	sort.Slice(mounts, func(i, j int) bool { return mounts[i].Destination < mounts[j].Destination })
 	hash := sha256.New()
-	for i, m := range mounts {
-		if i > 0 && mounts[i-1].Destination == m.Destination {
-			return fmt.Errorf("host content collision at %s; select only one source with that name", m.Destination)
-		}
+	for _, m := range mounts {
 		info, err := os.Stat(m.Source)
 		if err != nil {
-			return err
+			return fmt.Errorf("%s: %w", origin[m.Destination], err)
 		}
 		st := info.Sys().(*syscall.Stat_t)
 		// A bind follows its inode. Atomic replacement of an instruction file
@@ -262,7 +389,7 @@ func (p *hostProfile) resolveContent(agent string, scope Scope, home string) err
 
 func validatePersonalFile(path string, info fs.FileInfo) error {
 	st := info.Sys().(*syscall.Stat_t)
-	if !info.Mode().IsRegular() || st.Nlink != 1 || info.Mode().Perm()&0444 == 0 || info.Mode().Perm()&0022 != 0 || int(st.Uid) != os.Getuid() && st.Uid != 0 {
+	if !info.Mode().IsRegular() || st.Nlink != 1 || info.Mode().Perm()&0444 == 0 || info.Mode().Perm()&0022 != 0 || !hostContentOwnerTrusted(path, st.Uid) {
 		return fmt.Errorf("host content %q must be a readable, singly linked regular file writable only by its owner", path)
 	}
 	return nil
@@ -285,7 +412,7 @@ func validateSkillDirectory(root string) error {
 				return fmt.Errorf("host skill %q: SKILL.md must be a regular file", root)
 			}
 			st := info.Sys().(*syscall.Stat_t)
-			if int(st.Uid) != os.Getuid() && st.Uid != 0 || info.Mode().Perm()&0022 != 0 {
+			if !hostContentOwnerTrusted(path, st.Uid) || info.Mode().Perm()&0022 != 0 {
 				return fmt.Errorf("unsafe owner or directory permissions at %q", path)
 			}
 			return nil
