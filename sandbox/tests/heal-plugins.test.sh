@@ -27,6 +27,11 @@ source "${SCRIPT_DIR}/lib/assert.sh"
 # overrides instead of an ambient absolute path.
 unset CENCI_AGENT_CLI
 
+# Likewise neutralize any ambient CENCI_SANDBOX_PLUGINS (suites can run inside a
+# sandbox container that has it set) so cases without an explicit assignment see
+# the unset/default behavior.
+unset CENCI_SANDBOX_PLUGINS
+
 # assert_file_jq <label> <file> <jq-filter-that-must-be-true>
 assert_file_jq() {
     local label="$1" file="$2" filter="$3"
@@ -724,6 +729,401 @@ else
     fail "Codex plugin helpers must remain non-fatal"
 fi
 unset CODEX_FAKE_EXIT
+
+####################################################################
+# CENCI_SANDBOX_PLUGINS selection (#1003)
+#
+# entrypoint.sh passes ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch} (unquoted, so
+# it word-splits into one argument per plugin) as the plugin list of all four
+# Claude/Codex helpers: unset keeps today's pair, a subset provisions exactly
+# that subset, and an explicitly empty list makes the helpers do nothing at all
+# -- no marketplace registration, no installs, no refresh, no stamp. The
+# wrappers below mirror those entrypoint call lines so the suite exercises the
+# same expansion the container does; a grep contract at the end of the section
+# pins the entrypoint itself to it.
+####################################################################
+
+# shellcheck disable=SC2086 # host-validated closed set of plugin names; word splitting is the point
+ep_provision_claude() { provision_plugins "${PLUGINS_DIR}" cenci matteobortolazzo/cenci ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}; }
+# shellcheck disable=SC2086
+ep_update_claude() { update_plugins "${PLUGINS_DIR}" cenci 30 ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}; }
+# shellcheck disable=SC2086
+ep_provision_codex() { provision_codex_plugins "${CODEX_DIR}" cenci matteobortolazzo/cenci ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}; }
+# shellcheck disable=SC2086
+ep_update_codex() { update_codex_plugins "${CODEX_DIR}" cenci 0 ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}; }
+
+echo
+echo "CENCI_SANDBOX_PLUGINS selection tests"
+
+new_provision_case plugins-claude-subset
+make_fake_claude
+echo "case: Claude provisions exactly the listed subset"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS=cenci ep_provision_claude
+INSTALL_CALLS="$(grep -c "^plugin install " "${CLAUDE_FAKE_LOG}" || true)"
+if [[ "${INSTALL_CALLS}" -eq 1 ]] && grep -q "^plugin install cenci@cenci$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected exactly one 'plugin install cenci@cenci', got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+if ! grep -q "cenci-watch" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected no cenci-watch call for list 'cenci', got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+new_provision_case plugins-claude-unset
+make_fake_claude
+echo "case: Claude unset list provisions the default pair"
+PATH="${FAKE_BIN}:${PATH}" ep_provision_claude
+if grep -q "^plugin install cenci@cenci$" "${CLAUDE_FAKE_LOG}" && grep -q "^plugin install cenci-watch@cenci$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected both installs for an unset list, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+new_provision_case plugins-claude-empty
+make_fake_claude
+echo "case: Claude empty list provisions nothing and registers no marketplace"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS='' ep_provision_claude
+if [[ "$(log_count)" -eq 0 ]]; then
+    pass
+else
+    fail "expected zero claude invocations for an empty list, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+if [[ ! -d "${PLUGINS_DIR}/marketplaces/cenci" ]]; then
+    pass
+else
+    fail "expected no marketplace registration for an empty list"
+fi
+
+new_provision_case plugins-claude-update-subset
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed cenci 4.0.0
+seed_installed cenci-watch 4.0.0
+echo "case: Claude update refreshes only the listed subset"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS=cenci ep_update_claude
+UPDATE_CALLS="$(grep -c "^plugin update " "${CLAUDE_FAKE_LOG}" || true)"
+if [[ "${UPDATE_CALLS}" -eq 1 ]] && grep -q "^plugin update cenci@cenci$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected only 'plugin update cenci@cenci' with both plugins stale, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+new_provision_case plugins-claude-update-unset
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed cenci 4.0.0
+seed_installed cenci-watch 4.0.0
+echo "case: Claude update with an unset list refreshes the default pair"
+PATH="${FAKE_BIN}:${PATH}" ep_update_claude
+if grep -q "^plugin update cenci@cenci$" "${CLAUDE_FAKE_LOG}" && grep -q "^plugin update cenci-watch@cenci$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected both updates for an unset list, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+new_provision_case plugins-claude-update-empty
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed cenci 4.0.0
+echo "case: Claude update with an empty list makes no calls and writes no stamp"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS='' ep_update_claude
+if [[ "$(log_count)" -eq 0 ]]; then
+    pass
+else
+    fail "expected zero claude invocations for an empty list, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+if [[ ! -f "${PLUGINS_DIR}/${STAMP_NAME}" ]]; then
+    pass
+else
+    fail "expected no update stamp for an empty list"
+fi
+
+new_codex_case plugins-codex-subset
+make_fake_codex
+echo "case: Codex provisions exactly the listed subset"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS=cenci-watch ep_provision_codex
+if grep -q '^plugin add cenci-watch@cenci$' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "expected Codex to install cenci-watch, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+if ! grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "expected no Codex cenci install for list 'cenci-watch', got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case plugins-codex-unset
+make_fake_codex
+echo "case: Codex unset list provisions the default pair"
+PATH="${FAKE_BIN}:${PATH}" ep_provision_codex
+if grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}" && grep -q '^plugin add cenci-watch@cenci$' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "expected both Codex installs for an unset list, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case plugins-codex-empty
+make_fake_codex
+echo "case: Codex empty list provisions nothing and registers no marketplace"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS='' ep_provision_codex
+if [[ "$(codex_log_count)" -eq 0 ]]; then
+    pass
+else
+    fail "expected zero codex invocations for an empty list, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case plugins-codex-update-subset
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_CENCI_PRESENT=true
+export CODEX_FAKE_CENCI_WATCH_PRESENT=true
+export CODEX_FAKE_CENCI_VERSION=1.0.0 CODEX_FAKE_CENCI_WATCH_VERSION=2.0.0
+write_codex_snapshot_manifest 1.1.0 2.1.0
+echo "case: Codex update refreshes only the listed subset"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS=cenci ep_update_codex
+PLUGIN_ADD_CALLS="$(grep -c '^plugin add ' "${CODEX_FAKE_LOG}" || true)"
+if [[ "${PLUGIN_ADD_CALLS}" -eq 1 ]] && grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "expected only 'plugin add cenci@cenci' with both plugins stale, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case plugins-codex-update-unset
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_CENCI_PRESENT=true
+export CODEX_FAKE_CENCI_WATCH_PRESENT=true
+export CODEX_FAKE_CENCI_VERSION=1.0.0 CODEX_FAKE_CENCI_WATCH_VERSION=2.0.0
+write_codex_snapshot_manifest 1.1.0 2.1.0
+echo "case: Codex update with an unset list refreshes the default pair"
+PATH="${FAKE_BIN}:${PATH}" ep_update_codex
+if grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}" && grep -q '^plugin add cenci-watch@cenci$' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "expected both Codex refreshes for an unset list, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case plugins-codex-update-empty
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_CENCI_PRESENT=true
+export CODEX_FAKE_CENCI_WATCH_PRESENT=true
+export CODEX_FAKE_CENCI_VERSION=1.0.0 CODEX_FAKE_CENCI_WATCH_VERSION=2.0.0
+write_codex_snapshot_manifest 1.1.0 2.1.0
+echo "case: Codex update with an empty list makes no calls and writes no stamp"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS='' ep_update_codex
+if [[ "$(codex_log_count)" -eq 0 ]]; then
+    pass
+else
+    fail "expected zero codex invocations for an empty list, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+if [[ ! -f "${CODEX_DIR}/${STAMP_NAME}" ]]; then
+    pass
+else
+    fail "expected no Codex update stamp for an empty list"
+fi
+
+# ── Padded / multi-space / whitespace-only list values ────────────────
+# The host validates the value, but a hand-set or padded one must still behave:
+# the unquoted expansion drops empty tokens, so repeated or surrounding spaces
+# name the same plugins, and a whitespace-only value is an empty list.
+PADDED_PAIR='  cenci   cenci-watch  '
+PADDED_ONE=' cenci '
+BLANK='   '
+
+new_provision_case plugins-claude-padded-pair
+make_fake_claude
+echo "case: Claude provision with a padded pair installs exactly both plugins"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${PADDED_PAIR}" ep_provision_claude
+INSTALL_CALLS="$(grep -c "^plugin install " "${CLAUDE_FAKE_LOG}" || true)"
+if [[ "${INSTALL_CALLS}" -eq 2 ]] \
+    && grep -q "^plugin install cenci@cenci$" "${CLAUDE_FAKE_LOG}" \
+    && grep -q "^plugin install cenci-watch@cenci$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected exactly the two named installs for a padded pair, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+new_provision_case plugins-claude-padded-one
+make_fake_claude
+echo "case: Claude provision with a padded single value installs only that plugin"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${PADDED_ONE}" ep_provision_claude
+INSTALL_CALLS="$(grep -c "^plugin install " "${CLAUDE_FAKE_LOG}" || true)"
+if [[ "${INSTALL_CALLS}" -eq 1 ]] && grep -q "^plugin install cenci@cenci$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected exactly one 'plugin install cenci@cenci' for a padded single value, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+new_provision_case plugins-claude-blank
+make_fake_claude
+echo "case: Claude provision with a whitespace-only value behaves like an empty list"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${BLANK}" ep_provision_claude
+if [[ "$(log_count)" -eq 0 ]]; then
+    pass
+else
+    fail "expected zero claude invocations for a whitespace-only list, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+if [[ ! -d "${PLUGINS_DIR}/marketplaces/cenci" ]]; then
+    pass
+else
+    fail "expected no marketplace registration for a whitespace-only list"
+fi
+
+new_provision_case plugins-claude-update-padded-pair
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed cenci 4.0.0
+seed_installed cenci-watch 4.0.0
+echo "case: Claude update with a padded pair refreshes exactly both plugins"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${PADDED_PAIR}" ep_update_claude
+UPDATE_CALLS="$(grep -c "^plugin update " "${CLAUDE_FAKE_LOG}" || true)"
+if [[ "${UPDATE_CALLS}" -eq 2 ]] \
+    && grep -q "^plugin update cenci@cenci$" "${CLAUDE_FAKE_LOG}" \
+    && grep -q "^plugin update cenci-watch@cenci$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected exactly the two named updates for a padded pair, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+new_provision_case plugins-claude-update-padded-one
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed cenci 4.0.0
+seed_installed cenci-watch 4.0.0
+echo "case: Claude update with a padded single value refreshes only that plugin"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${PADDED_ONE}" ep_update_claude
+UPDATE_CALLS="$(grep -c "^plugin update " "${CLAUDE_FAKE_LOG}" || true)"
+if [[ "${UPDATE_CALLS}" -eq 1 ]] && grep -q "^plugin update cenci@cenci$" "${CLAUDE_FAKE_LOG}"; then
+    pass
+else
+    fail "expected only 'plugin update cenci@cenci' for a padded single value, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+
+new_provision_case plugins-claude-update-blank
+make_fake_claude
+seed_marketplace 4.7.1
+seed_installed cenci 4.0.0
+echo "case: Claude update with a whitespace-only value makes no calls and writes no stamp"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${BLANK}" ep_update_claude
+if [[ "$(log_count)" -eq 0 ]]; then
+    pass
+else
+    fail "expected zero claude invocations for a whitespace-only list, got: $(cat "${CLAUDE_FAKE_LOG}")"
+fi
+if [[ ! -f "${PLUGINS_DIR}/${STAMP_NAME}" ]]; then
+    pass
+else
+    fail "expected no update stamp for a whitespace-only list"
+fi
+
+new_codex_case plugins-codex-padded-pair
+make_fake_codex
+echo "case: Codex provision with a padded pair installs exactly both plugins"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${PADDED_PAIR}" ep_provision_codex
+PLUGIN_ADD_CALLS="$(grep -c '^plugin add ' "${CODEX_FAKE_LOG}" || true)"
+if [[ "${PLUGIN_ADD_CALLS}" -eq 2 ]] \
+    && grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}" \
+    && grep -q '^plugin add cenci-watch@cenci$' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "expected exactly the two named Codex installs for a padded pair, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case plugins-codex-padded-one
+make_fake_codex
+echo "case: Codex provision with a padded single value installs only that plugin"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${PADDED_ONE}" ep_provision_codex
+PLUGIN_ADD_CALLS="$(grep -c '^plugin add ' "${CODEX_FAKE_LOG}" || true)"
+if [[ "${PLUGIN_ADD_CALLS}" -eq 1 ]] && grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "expected exactly one 'plugin add cenci@cenci' for a padded single value, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case plugins-codex-blank
+make_fake_codex
+echo "case: Codex provision with a whitespace-only value behaves like an empty list"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${BLANK}" ep_provision_codex
+if [[ "$(codex_log_count)" -eq 0 ]]; then
+    pass
+else
+    fail "expected zero codex invocations for a whitespace-only list, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case plugins-codex-update-padded-pair
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_CENCI_PRESENT=true
+export CODEX_FAKE_CENCI_WATCH_PRESENT=true
+export CODEX_FAKE_CENCI_VERSION=1.0.0 CODEX_FAKE_CENCI_WATCH_VERSION=2.0.0
+write_codex_snapshot_manifest 1.1.0 2.1.0
+echo "case: Codex update with a padded pair refreshes exactly both plugins"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${PADDED_PAIR}" ep_update_codex
+PLUGIN_ADD_CALLS="$(grep -c '^plugin add ' "${CODEX_FAKE_LOG}" || true)"
+if [[ "${PLUGIN_ADD_CALLS}" -eq 2 ]] \
+    && grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}" \
+    && grep -q '^plugin add cenci-watch@cenci$' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "expected exactly the two named Codex refreshes for a padded pair, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case plugins-codex-update-padded-one
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_CENCI_PRESENT=true
+export CODEX_FAKE_CENCI_WATCH_PRESENT=true
+export CODEX_FAKE_CENCI_VERSION=1.0.0 CODEX_FAKE_CENCI_WATCH_VERSION=2.0.0
+write_codex_snapshot_manifest 1.1.0 2.1.0
+echo "case: Codex update with a padded single value refreshes only that plugin"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${PADDED_ONE}" ep_update_codex
+PLUGIN_ADD_CALLS="$(grep -c '^plugin add ' "${CODEX_FAKE_LOG}" || true)"
+if [[ "${PLUGIN_ADD_CALLS}" -eq 1 ]] && grep -q '^plugin add cenci@cenci$' "${CODEX_FAKE_LOG}"; then
+    pass
+else
+    fail "expected only 'plugin add cenci@cenci' for a padded single value, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+
+new_codex_case plugins-codex-update-blank
+make_fake_codex
+export CODEX_FAKE_MARKETPLACE_PRESENT=true
+export CODEX_FAKE_CENCI_PRESENT=true
+export CODEX_FAKE_CENCI_WATCH_PRESENT=true
+export CODEX_FAKE_CENCI_VERSION=1.0.0 CODEX_FAKE_CENCI_WATCH_VERSION=2.0.0
+write_codex_snapshot_manifest 1.1.0 2.1.0
+echo "case: Codex update with a whitespace-only value makes no calls and writes no stamp"
+PATH="${FAKE_BIN}:${PATH}" CENCI_SANDBOX_PLUGINS="${BLANK}" ep_update_codex
+if [[ "$(codex_log_count)" -eq 0 ]]; then
+    pass
+else
+    fail "expected zero codex invocations for a whitespace-only list, got: $(cat "${CODEX_FAKE_LOG}")"
+fi
+if [[ ! -f "${CODEX_DIR}/${STAMP_NAME}" ]]; then
+    pass
+else
+    fail "expected no Codex update stamp for a whitespace-only list"
+fi
+
+# The entrypoint cannot run on the host, so pin its call lines instead: all four
+# Claude/Codex helper calls must carry the expansion, and none may still pass
+# the literal pair. OpenCode's calls take no plugin list and are unaffected.
+ENTRYPOINT="${SCRIPT_DIR}/../entrypoint.sh"
+echo "case: entrypoint.sh passes the configured plugin list to every Claude/Codex helper"
+EXPANSION_LINES="$(grep -cE '^[[:space:]]*(provision|update)_(codex_)?plugins .* \$\{CENCI_SANDBOX_PLUGINS-cenci cenci-watch\}$' "${ENTRYPOINT}" || true)"
+if [[ "${EXPANSION_LINES}" -eq 4 ]]; then
+    pass
+else
+    fail "expected exactly 4 helper call lines using \${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}, got ${EXPANSION_LINES}"
+fi
+if ! grep -qE '^[[:space:]]*(provision|update)_(codex_)?plugins .* cenci cenci-watch$' "${ENTRYPOINT}"; then
+    pass
+else
+    fail "entrypoint.sh still has a helper call line passing the literal 'cenci cenci-watch'"
+fi
 
 ####################################################################
 # CENCI_AGENT_CLI leak regression (#430)

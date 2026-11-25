@@ -409,7 +409,8 @@ Codex adapter check does not (see its entry):
   dispatch` and `cenci babysit` launches before any window is spawned, so a babysit
   launch refused this way does not advance ci-repair attempts or mark feedback as
   launched, and never switches agents. Sandbox launches skip the probe and rely on
-  boot-time provisioning (`provision_codex_plugins` in `sandbox/lib/migrate-settings.sh`).
+  boot-time provisioning of the configured plugins (`provision_codex_plugins` in
+  `sandbox/lib/migrate-settings.sh`; the `sandbox.plugins` setting, default both).
   Claude launches and user-defined (config-only) workflows are not probed, and
   `--dry-run` does not check the installed plugin. Known limitation: the probe asks the
   Codex binary named by the first token of the configured host command, from the `cenci`

@@ -69,15 +69,22 @@ project value if you need to re-enable it just for yourself.
 in that repo's sessions.
 
 **What keeps working:** the `cenci-watch` daemon, `cenci status`, `cn`/`cenci sandbox`
-launches, and everything else that doesn't come from the `cenci` plugin. The sandbox
-entrypoint still installs and updates the `cenci` plugin into the container's plugin cache
-on every boot regardless of this setting — only whether that repo's sessions *load* it
-changes, not whether it's provisioned.
+launches, and everything else that doesn't come from the `cenci` plugin. With the default
+`sandbox.plugins` (unset, so both `cenci` and `cenci-watch`), the sandbox entrypoint still
+installs and updates the `cenci` plugin into the container's plugin cache on every boot
+regardless of this setting — only whether that repo's sessions *load* it changes, not
+whether it's provisioned. A repo that narrows `sandbox.plugins` to exclude `cenci` stops
+that provisioning altogether; see
+[Plugin selection](../sandbox/README.md#plugin-selection-sandboxplugins).
 
 **Verified inside a real `cn` session.** This precedence claim was checked empirically,
-because `cn`'s entrypoint force-merges `"cenci@cenci": true` into the container's
-user-scope `/home/dev/.claude/settings.json` on every boot — the repo-level `false` above
-has to survive that force-enable, not just a plain multi-scope Claude Code install. Inside a
+because, with the default `sandbox.plugins`, `cn`'s entrypoint force-merges
+`"cenci@cenci": true` into the container's user-scope `/home/dev/.claude/settings.json` on
+every boot (a list that excludes `cenci` deletes the entry instead, per the
+[Plugin selection](../sandbox/README.md#plugin-selection-sandboxplugins) section of
+`sandbox/README.md`) — the
+repo-level `false` above has to survive that force-enable, not just a plain multi-scope
+Claude Code install. Inside a
 real `cn` session with the force-enable active (confirmed present:
 `"enabledPlugins": {"cenci@cenci": true}` and `"permissions": {"defaultMode":
 "bypassPermissions"}` in the container's user-scope settings), a project-scope `false`

@@ -222,7 +222,8 @@ workflows cannot run.
   the Codex config, or launch in the sandbox. A babysit launch refused this way does not
   advance ci-repair attempts or mark feedback as launched, and never switches agents.
   `--dry-run` does not run the check. Sandbox launches skip it and rely on boot-time
-  provisioning (`provision_codex_plugins` in `sandbox/lib/migrate-settings.sh`). Known
+  provisioning of the configured plugins (`provision_codex_plugins` in
+  `sandbox/lib/migrate-settings.sh`; the `sandbox.plugins` setting, default both). Known
   limitation: the probe asks the Codex binary named by the first token of the configured
   host command, from the `cenci` process's working directory and environment; it does not
   apply `--profile`/`-c` flags, a project-scoped `.codex/config.toml`, or a different

@@ -250,10 +250,12 @@ fi
 # (so --dangerously-skip-permissions never prompts and never downgrades to
 # `default` in headless runs — the container boundary is what makes this safe;
 # see SECURITY.md's threat model, and they must never reach the host
-# ~/.claude/settings.json), the current cenci-watch/cenci plugins from the
-# cenci marketplace (so sandbox sessions are visible on the host status
-# bar), a removal of the stale pre-rename muxwatch/ccflow/claude-tools
-# stack that old home volumes still carry, and default UI preferences
+# ~/.claude/settings.json), the cenci-watch/cenci plugins named by
+# CENCI_SANDBOX_PLUGINS (default both) from the cenci marketplace (so sandbox
+# sessions are visible on the host status bar; an excluded plugin's
+# enabledPlugins entry is deleted), a removal of the stale pre-rename
+# muxwatch/ccflow/claude-tools stack that old home volumes still carry, and
+# default UI preferences
 # (fullscreen TUI, clear-context-on-plan-accept) seeded only when the volume
 # has none of its own.
 #
@@ -334,15 +336,20 @@ fi
 # calls here (the TTL-gated refresh below is the only recurring cost). Never
 # blocks container start after the selected CLI has been installed above;
 # marketplace/plugin network failures still only warn to stderr.
+# The plugin list is ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch} (sandbox.plugins,
+# set by the launcher): unset keeps the default pair, a subset provisions only
+# that subset, and an empty list provisions nothing — not even the marketplace.
 case "${CENCI_SANDBOX_AGENT:-claude}" in
 codex)
-    provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci cenci cenci-watch
+    # shellcheck disable=SC2086 # unquoted on purpose: the launcher validates the value against a closed set of plugin names, and word splitting yields one argument per plugin
+    provision_codex_plugins /home/dev/.codex cenci matteobortolazzo/cenci ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}
     ;;
 opencode)
     provision_opencode_plugins /home/dev/.cenci-src matteobortolazzo/cenci
     ;;
 *)
-    provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci cenci cenci-watch
+    # shellcheck disable=SC2086 # unquoted on purpose: the launcher validates the value against a closed set of plugin names, and word splitting yields one argument per plugin
+    provision_plugins /home/dev/.claude/plugins cenci matteobortolazzo/cenci ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}
     ;;
 esac
 
@@ -353,16 +360,19 @@ esac
 # and bumps only the plugins whose installed version differs, gated by a
 # 30-minute stamp so rapid stop/start cycles make zero network calls. Forced
 # variant (ttl 0) is `cenci sandbox update-plugins`. Same guarantee as above:
-# failures warn to stderr and never block container start.
+# failures warn to stderr and never block container start. Same configurable
+# plugin list as above: an empty list skips the refresh entirely.
 case "${CENCI_SANDBOX_AGENT:-claude}" in
 codex)
-    update_codex_plugins /home/dev/.codex cenci 30 cenci cenci-watch
+    # shellcheck disable=SC2086 # unquoted on purpose: the launcher validates the value against a closed set of plugin names, and word splitting yields one argument per plugin
+    update_codex_plugins /home/dev/.codex cenci 30 ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}
     ;;
 opencode)
     update_opencode_plugins /home/dev/.cenci-src matteobortolazzo/cenci 30
     ;;
 *)
-    update_plugins /home/dev/.claude/plugins cenci 30 cenci cenci-watch
+    # shellcheck disable=SC2086 # unquoted on purpose: the launcher validates the value against a closed set of plugin names, and word splitting yields one argument per plugin
+    update_plugins /home/dev/.claude/plugins cenci 30 ${CENCI_SANDBOX_PLUGINS-cenci cenci-watch}
     ;;
 esac
 

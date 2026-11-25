@@ -1031,6 +1031,64 @@ alongside home and agent-CLI volumes.
 - **Repo-scope-only**: dind is only available when launching from inside a git repo (repo scope) — not in legacy/default scope.
 - **Self-skips in CI**: installing sysbox on a CI runner is out of scope for cenci; CI environments simply don't have it registered, so dind-dependent tests should not assume it's available there.
 
+### Plugin selection (sandbox.plugins)
+
+By default every Claude or Codex sandbox provisions both pipeline plugins, `cenci` (the
+flow workflow layer) and `cenci-watch`. A repo can narrow that in `.cenci/config.json`:
+
+```json
+{ "sandbox": { "plugins": ["cenci-watch"] } }
+```
+
+- **Allowed values**: `cenci` and `cenci-watch`, each at most once. The order is not
+  significant.
+- **Default**: both plugins, when the file, the `sandbox` key or the `plugins` key is absent,
+  and always outside repo scope (legacy/default scope never reads the file).
+- **Empty array** (`"plugins": []`): provision nothing. The entrypoint skips the install,
+  the TTL refresh and the registration of the `cenci` marketplace, which makes `cenci
+  sandbox update-plugins` a no-op for Claude and Codex. This is different from leaving the
+  key out, which keeps both.
+- **Unset compatibility**: the launcher passes the list to the container as
+  `CENCI_SANDBOX_PLUGINS` at creation. A container created before this existed has no such
+  variable, and an unset variable means the default pair, so it keeps provisioning both.
+- **Malformed values fail closed**: unreadable or invalid JSON, a non-object top level, a
+  `sandbox` or `plugins` of the wrong type, a non-string element, an unknown name (for
+  example `cenci-sandbox`) or a duplicate aborts the launch with an error naming the file.
+  Nothing falls back to the default.
+- **When a change takes effect**: at container creation only, because a container's
+  environment is fixed for its lifetime. Launching prints a one-line `Note:` whenever the
+  list differs from the default. Attaching to a running container whose list differs from the
+  resolved one prints `Warning: running container '<name>' has a different sandbox plugin
+  list than the resolved config …; run 'cenci sandbox stop <name>' and relaunch to apply the
+  new list.` and attaches anyway; it never recreates the container. A changed
+  `sandbox.plugins` therefore applies only after `cenci sandbox stop <name>` and a relaunch;
+  `cenci sandbox update-plugins` on a still-running container uses that container's
+  create-time list, not the current config (only attaching warns about the difference).
+- **Existing home volumes**: a narrowed list never removes installed plugin files, and a
+  marketplace that is already registered is kept.
+  - *Claude*: `migrate_settings` runs on every boot, so the `enabledPlugins` entry
+    (`cenci@cenci` or `cenci-watch@cenci`) of an excluded plugin is deleted from the
+    volume's user-scope `settings.json` (when `enabledPlugins` is an object or absent; a
+    wrong-typed value such as a string or array has nothing to delete and is left as it is).
+    The plugin stays installed on disk but is no longer enabled or refreshed. Other
+    `enabledPlugins` keys and every other setting are untouched.
+  - *Codex*: there is no equivalent disable step. An excluded plugin that is already
+    installed stays installed and active, it just stops being refreshed. Only resetting the
+    home volume (see [Reset an instance](#reset-an-instance)) removes it.
+- **Scope**: the list governs Claude and Codex provisioning. OpenCode provisioning is a
+  separate path and ignores it.
+
+**Dispatch caveat.** Fleet dispatch (`cenci dispatch`) and the implement pipeline run
+`cenci run implement` inside the session, which needs the `cenci` flow plugin there. A
+dispatch-enrolled repo whose `sandbox.plugins` excludes `cenci` therefore dispatches
+sessions that cannot run the pipeline. The launcher does not link the two settings, so keep
+`cenci` in the list for any enrolled repo (see also
+[Selective adoption](../docs/selective-adoption.md)). Excluding `cenci` also drops the
+plugin's `check-sensitive-files.sh` secret-file guard from those sessions, one of the few
+things standing between a `bypassPermissions` session and files like `.env`; replace it with
+a project-scope `permissions.deny` block, see [Security: what you lose, and how to replace
+it](../docs/selective-adoption.md#security-what-you-lose-and-how-to-replace-it).
+
 ### cenci-watch (optional)
 
 The launcher automatically:
@@ -1066,10 +1124,12 @@ internal `CENCI_SANDBOX_AGENT` contract. Updater diagnostics stream directly; fa
 before credentials or a workload container are involved. Claude then
 provisions `~/.claude/plugins` and Codex provisions `~/.codex` through the writable CLI.
 Both paths register the `cenci` marketplace,
-install `cenci-watch` and `cenci` when missing, and refresh them on a 30-minute
-TTL. Rapid stop/start cycles therefore make zero network calls; `cenci sandbox
-update-plugins` forces provisioning plus refresh through the selected agent's
-CLI. Plugin network failures warn but never block container startup. Existing
+install the configured plugins (default both `cenci-watch` and `cenci`, see
+[Plugin selection](#plugin-selection-sandboxplugins)) when missing, and refresh them on a
+30-minute TTL. Rapid stop/start cycles therefore make zero network calls; `cenci sandbox
+update-plugins` forces provisioning plus refresh of the container's configured plugins
+through the selected agent's CLI (a no-op for an empty list; see
+[Plugin selection](#plugin-selection-sandboxplugins)). Plugin network failures warn but never block container startup. Existing
 Claude home volumes are migrated off the old `muxwatch`/`ccflow` plugins and the
 renamed `claude-tools` marketplace at the same time.
 
@@ -1186,10 +1246,13 @@ unpinned stores through `cenci sandbox update-agent --all` using each agent's po
 ### Update sandbox plugins
 
 Nothing to do normally: on each container start the entrypoint uses the selected
-agent's native CLI to refresh the `cenci` marketplace and update
-`cenci`/`cenci-watch` in that agent's home volume (TTL-gated to 30 minutes).
+agent's native CLI to refresh the `cenci` marketplace and update the configured plugins
+(default both `cenci` and `cenci-watch`, see
+[Plugin selection](#plugin-selection-sandboxplugins)) in that agent's home volume
+(TTL-gated to 30 minutes).
 To force provisioning of anything missing and refresh immediately — e.g. right
-after merging a plugin change — run:
+after merging a plugin change — run the following (it acts on the container's configured
+plugin list, so an empty list makes it a no-op for Claude and Codex):
 
 ```bash
 cenci sandbox update-plugins                  # Claude home / Claude CLI
